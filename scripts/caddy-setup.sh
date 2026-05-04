@@ -17,7 +17,7 @@
 #     └── path /*           → http://127.0.0.1:9000 (personal web services)
 #
 # Certificate:
-#   Self-signed RSA-4096 generated in /etc/caddy/tls/
+#   Self-signed EC P-256 generated in /etc/caddy/tls/
 #   wstunnel clients use certificate pinning against this file.
 #   wg-add-client.sh reads it from /etc/caddy/tls/cert.pem to include it
 #   in the client package.
