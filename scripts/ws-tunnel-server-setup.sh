@@ -54,7 +54,6 @@ SERVICE_FILE="/etc/systemd/system/wstunnel.service"
 # Intestazione
 # =============================================================================
 
-clear
 echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}║    wstunnel — Setup backend v10          ║${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
@@ -93,11 +92,19 @@ esac
 
 info "Architettura rilevata: ${ARCH} → ${WSTUNNEL_ARCH}"
 
-WSTUNNEL_VERSION=$(curl -s \
-  "https://api.github.com/repos/erebe/wstunnel/releases/latest" \
-  | grep -oP '"tag_name": "v\K[^"]+' || true)
+info "Recupero ultima versione da GitHub..."
+API_RESPONSE=$(curl -s --fail --connect-timeout 15 --max-time 30 \
+  "https://api.github.com/repos/erebe/wstunnel/releases/latest" 2>/dev/null || true)
 
-[[ -z "$WSTUNNEL_VERSION" ]] && error "Impossibile recuperare la versione più recente da GitHub."
+if [[ -z "$API_RESPONSE" ]]; then
+  error "Impossibile contattare GitHub API. Verifica la connettività."
+fi
+if echo "$API_RESPONSE" | grep -qi '"rate limit"'; then
+  error "GitHub API rate limit raggiunto. Aspetta qualche minuto e riprova."
+fi
+
+WSTUNNEL_VERSION=$(echo "$API_RESPONSE" | grep -oP '"tag_name": "v\K[^"]+' || true)
+[[ -z "$WSTUNNEL_VERSION" ]] && error "Versione non ricavabile da GitHub API."
 info "Ultima versione disponibile: v${WSTUNNEL_VERSION}"
 
 INSTALL_WSTUNNEL=false
@@ -114,13 +121,31 @@ else
 fi
 
 if [[ "$INSTALL_WSTUNNEL" == "true" ]]; then
-  DOWNLOAD_URL="https://github.com/erebe/wstunnel/releases/download/v${WSTUNNEL_VERSION}/wstunnel_${WSTUNNEL_VERSION}_linux_${WSTUNNEL_ARCH}.tar.gz"
+  TARBALL_NAME="wstunnel_${WSTUNNEL_VERSION}_linux_${WSTUNNEL_ARCH}.tar.gz"
+  DOWNLOAD_URL="https://github.com/erebe/wstunnel/releases/download/v${WSTUNNEL_VERSION}/${TARBALL_NAME}"
+  CHECKSUM_URL="https://github.com/erebe/wstunnel/releases/download/v${WSTUNNEL_VERSION}/wstunnel_${WSTUNNEL_VERSION}_checksums.txt"
+
   TMPDIR_WS=$(mktemp -d)
   trap 'rm -rf "$TMPDIR_WS"' EXIT
 
-  info "Download da: ${DOWNLOAD_URL}"
-  curl -L --progress-bar -o "${TMPDIR_WS}/wstunnel.tar.gz" "$DOWNLOAD_URL" \
-    || error "Download fallito. Verifica la connettività e la versione su github.com/erebe/wstunnel/releases"
+  info "Download binario da: ${DOWNLOAD_URL}"
+  curl -L --fail --connect-timeout 15 --max-time 300 \
+    --retry 3 --retry-delay 5 \
+    --progress-bar -o "${TMPDIR_WS}/wstunnel.tar.gz" "$DOWNLOAD_URL" \
+    || error "Download binario fallito. Verifica connettività e: github.com/erebe/wstunnel/releases"
+
+  info "Download checksum da GitHub..."
+  curl -L --fail --connect-timeout 15 --max-time 30 \
+    --retry 3 --retry-delay 5 \
+    -s -o "${TMPDIR_WS}/checksums.txt" "$CHECKSUM_URL" \
+    || error "Download checksum fallito."
+
+  info "Verifica integrità SHA256..."
+  EXPECTED=$(grep "$TARBALL_NAME" "${TMPDIR_WS}/checksums.txt" | awk '{print $1}')
+  [[ -z "$EXPECTED" ]] && error "Checksum per ${TARBALL_NAME} non trovato nel file checksums."
+  ACTUAL=$(sha256sum "${TMPDIR_WS}/wstunnel.tar.gz" | awk '{print $1}')
+  [[ "$EXPECTED" == "$ACTUAL" ]] || error "SHA256 mismatch — binario corrotto o compromesso."
+  success "SHA256 verificato: ${ACTUAL:0:16}…"
 
   tar xzf "${TMPDIR_WS}/wstunnel.tar.gz" -C "${TMPDIR_WS}/"
 
@@ -236,10 +261,36 @@ ExecStart=${WSTUNNEL_BIN} server \\
 
 Restart=on-failure
 RestartSec=5
+
+# Filesystem isolation
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadOnlyPaths=${WSTUNNEL_DIR}
+PrivateTmp=yes
+PrivateDevices=yes
+
+# Kernel protection
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+
+# Capabilities — none needed (port >1024, loopback only)
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Syscall hardening
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target
@@ -255,7 +306,10 @@ else
   success "wstunnel.service abilitato e avviato"
 fi
 
-sleep 2
+for i in {1..10}; do
+  systemctl is-active --quiet wstunnel && break
+  sleep 1
+done
 if systemctl is-active --quiet wstunnel; then
   success "wstunnel.service attivo su ws://127.0.0.1:${WSTUNNEL_INTERNAL_PORT}"
 else
