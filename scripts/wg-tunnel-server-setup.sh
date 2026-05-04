@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 # =============================================================================
-# wstunnel-server-setup.sh — Installa wstunnel v10 e genera il secret condiviso
+# wg-tunnel-server-setup.sh — Install wstunnel v10 and generate the shared secret
 #
-# Uso:
-#   chmod +x wstunnel-server-setup.sh
-#   sudo ./wstunnel-server-setup.sh
+# Usage:
+#   chmod +x wg-tunnel-server-setup.sh
+#   sudo ./wg-tunnel-server-setup.sh
 #
-# Prerequisiti:
-#   - WireGuard già installato e funzionante su UDP:51820
-#   - curl installato
+# Prerequisites:
+#   - WireGuard already installed and running on UDP:51820
+#   - curl installed
 #
-# Questo script è idempotente: può essere rieseguito senza effetti collaterali.
-# Se wstunnel è già installato, viene aggiornato solo se la versione è diversa.
+# This script is idempotent: can be re-run without side effects.
+# If wstunnel is already installed, it is updated only if the version differs.
 #
-# Nota: il TLS è gestito da Caddy (caddy-setup.sh), non da questo script.
-# wstunnel gira come backend locale su ws://127.0.0.1:8080 senza TLS diretto.
-# Eseguire caddy-setup.sh dopo questo script.
+# Note: TLS is handled by Caddy (caddy-setup.sh), not by this script.
+# wstunnel runs as a local backend on ws://127.0.0.1:8080 without direct TLS.
+# Run caddy-setup.sh after this script.
 # =============================================================================
 
 set -euo pipefail
 
-# ── Colori ────────────────────────────────────────────────────────────────────
+# ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -34,86 +34,86 @@ warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 section() { echo -e "\n${BOLD}━━━  $*  ━━━${NC}\n"; }
 
-# ── Controllo root ────────────────────────────────────────────────────────────
-[[ $EUID -ne 0 ]] && error "Eseguire con sudo: sudo ./wstunnel-server-setup.sh"
+# ── Root check ────────────────────────────────────────────────────────────────
+[[ $EUID -ne 0 ]] && error "Run with sudo: sudo ./wg-tunnel-server-setup.sh"
 
 umask 077
 
-# ── Costanti configurabili ────────────────────────────────────────────────────
+# ── Configurable constants ────────────────────────────────────────────────────
 WSTUNNEL_DIR="/etc/wstunnel"
 WSTUNNEL_BIN="/usr/local/bin/wstunnel"
 WSTUNNEL_SECRET_FILE="${WSTUNNEL_DIR}/secret"
-# File env letto da wstunnel.service e caddy.service via EnvironmentFile.
-# Generato qui, consumato da caddy-setup.sh — unica fonte di verità.
+# Env file read by wstunnel.service and caddy.service via EnvironmentFile.
+# Generated here, consumed by caddy-setup.sh — single source of truth.
 SECRET_ENV_FILE="${WSTUNNEL_DIR}/secret-env"
-WSTUNNEL_INTERNAL_PORT=8080   # porta loopback — TLS terminato da Caddy
+WSTUNNEL_INTERNAL_PORT=8080   # loopback port — TLS terminated by Caddy
 WG_PORT=51820
 SERVICE_FILE="/etc/systemd/system/wstunnel.service"
 
 # =============================================================================
-# Intestazione
+# Header
 # =============================================================================
 
 echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║    wstunnel — Setup backend v10          ║${NC}"
+echo -e "${BOLD}║    wstunnel — Backend setup v10          ║${NC}"
 echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
 echo ""
 
 # =============================================================================
-# Prerequisiti
+# Prerequisites
 # =============================================================================
 
-section "Verifica prerequisiti"
+section "Prerequisites check"
 
-command -v curl > /dev/null || error "curl non trovato. Installa con: apt install curl"
+command -v curl > /dev/null || error "curl not found. Install with: apt install curl"
 
 if ! ss -ulnp | grep -q ":${WG_PORT}"; then
-  warn "Nessun processo in ascolto su UDP:${WG_PORT}."
-  warn "Verifica che WireGuard sia attivo: sudo systemctl status wg-quick@wg0"
-  read -rp "$(echo -e "${YELLOW}Continuare comunque? [y/N]:${NC} ")" force_continue
+  warn "No process listening on UDP:${WG_PORT}."
+  warn "Verify WireGuard is active: sudo systemctl status wg-quick@wg0"
+  read -rp "$(echo -e "${YELLOW}Continue anyway? [y/N]:${NC} ")" force_continue
   [[ "${force_continue,,}" == "y" ]] || exit 0
 fi
 
-success "Prerequisiti verificati"
+success "Prerequisites verified"
 
 # =============================================================================
 # Download wstunnel
 # =============================================================================
 
-section "Installazione wstunnel"
+section "wstunnel installation"
 
 ARCH=$(uname -m)
 case "$ARCH" in
   x86_64)  WSTUNNEL_ARCH="amd64" ;;
   aarch64) WSTUNNEL_ARCH="arm64" ;;
   armv7l)  WSTUNNEL_ARCH="armv7" ;;
-  *)       error "Architettura non supportata: ${ARCH}" ;;
+  *)       error "Unsupported architecture: ${ARCH}" ;;
 esac
 
-info "Architettura rilevata: ${ARCH} → ${WSTUNNEL_ARCH}"
+info "Architecture detected: ${ARCH} → ${WSTUNNEL_ARCH}"
 
-info "Recupero ultima versione da GitHub..."
+info "Fetching latest version from GitHub..."
 API_RESPONSE=$(curl -s --fail --connect-timeout 15 --max-time 30 \
   "https://api.github.com/repos/erebe/wstunnel/releases/latest" 2>/dev/null || true)
 
 if [[ -z "$API_RESPONSE" ]]; then
-  error "Impossibile contattare GitHub API. Verifica la connettività."
+  error "Cannot reach GitHub API. Check connectivity."
 fi
 if echo "$API_RESPONSE" | grep -qi '"rate limit"'; then
-  error "GitHub API rate limit raggiunto. Aspetta qualche minuto e riprova."
+  error "GitHub API rate limit reached. Wait a few minutes and retry."
 fi
 
 WSTUNNEL_VERSION=$(echo "$API_RESPONSE" | grep -oP '"tag_name": "v\K[^"]+' || true)
-[[ -z "$WSTUNNEL_VERSION" ]] && error "Versione non ricavabile da GitHub API."
-info "Ultima versione disponibile: v${WSTUNNEL_VERSION}"
+[[ -z "$WSTUNNEL_VERSION" ]] && error "Cannot determine version from GitHub API."
+info "Latest version available: v${WSTUNNEL_VERSION}"
 
 INSTALL_WSTUNNEL=false
 if command -v wstunnel > /dev/null 2>&1; then
   INSTALLED_VERSION=$(wstunnel --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || true)
   if [[ "$INSTALLED_VERSION" == "$WSTUNNEL_VERSION" ]]; then
-    success "wstunnel v${WSTUNNEL_VERSION} già installato — skip download"
+    success "wstunnel v${WSTUNNEL_VERSION} already installed — skipping download"
   else
-    info "Versione installata: ${INSTALLED_VERSION:-sconosciuta} — aggiornamento a ${WSTUNNEL_VERSION}"
+    info "Installed version: ${INSTALLED_VERSION:-unknown} — updating to ${WSTUNNEL_VERSION}"
     INSTALL_WSTUNNEL=true
   fi
 else
@@ -128,99 +128,99 @@ if [[ "$INSTALL_WSTUNNEL" == "true" ]]; then
   TMPDIR_WS=$(mktemp -d)
   trap 'rm -rf "$TMPDIR_WS"' EXIT
 
-  info "Download binario da: ${DOWNLOAD_URL}"
+  info "Downloading binary from: ${DOWNLOAD_URL}"
   curl -L --fail --connect-timeout 15 --max-time 300 \
     --retry 3 --retry-delay 5 \
     --progress-bar -o "${TMPDIR_WS}/wstunnel.tar.gz" "$DOWNLOAD_URL" \
-    || error "Download binario fallito. Verifica connettività e: github.com/erebe/wstunnel/releases"
+    || error "Binary download failed. Check connectivity and: github.com/erebe/wstunnel/releases"
 
-  info "Download checksum da GitHub..."
+  info "Downloading checksum from GitHub..."
   curl -L --fail --connect-timeout 15 --max-time 30 \
     --retry 3 --retry-delay 5 \
     -s -o "${TMPDIR_WS}/checksums.txt" "$CHECKSUM_URL" \
-    || error "Download checksum fallito."
+    || error "Checksum download failed."
 
-  info "Verifica integrità SHA256..."
+  info "Verifying SHA256 integrity..."
   EXPECTED=$(grep "$TARBALL_NAME" "${TMPDIR_WS}/checksums.txt" | awk '{print $1}')
-  [[ -z "$EXPECTED" ]] && error "Checksum per ${TARBALL_NAME} non trovato nel file checksums."
+  [[ -z "$EXPECTED" ]] && error "Checksum for ${TARBALL_NAME} not found in checksums file."
   ACTUAL=$(sha256sum "${TMPDIR_WS}/wstunnel.tar.gz" | awk '{print $1}')
-  [[ "$EXPECTED" == "$ACTUAL" ]] || error "SHA256 mismatch — binario corrotto o compromesso."
-  success "SHA256 verificato: ${ACTUAL:0:16}…"
+  [[ "$EXPECTED" == "$ACTUAL" ]] || error "SHA256 mismatch — binary corrupted or compromised."
+  success "SHA256 verified: ${ACTUAL:0:16}…"
 
   tar xzf "${TMPDIR_WS}/wstunnel.tar.gz" -C "${TMPDIR_WS}/"
 
   EXTRACTED_BIN="${TMPDIR_WS}/wstunnel"
-  [[ ! -f "$EXTRACTED_BIN" ]] && error "Binario 'wstunnel' non trovato nell'archivio."
+  [[ ! -f "$EXTRACTED_BIN" ]] && error "Binary 'wstunnel' not found in archive."
 
   file "$EXTRACTED_BIN" | grep -q "ELF" \
-    || error "Il file scaricato non sembra un eseguibile ELF valido."
+    || error "Downloaded file does not appear to be a valid ELF executable."
 
   if systemctl is-active --quiet wstunnel 2>/dev/null; then
-    info "Fermo wstunnel.service per aggiornamento binario..."
+    info "Stopping wstunnel.service to update binary..."
     systemctl stop wstunnel
   fi
 
   install -m 755 "$EXTRACTED_BIN" "$WSTUNNEL_BIN"
-  success "wstunnel v${WSTUNNEL_VERSION} installato in ${WSTUNNEL_BIN}"
+  success "wstunnel v${WSTUNNEL_VERSION} installed to ${WSTUNNEL_BIN}"
 fi
 
 INSTALLED_VER=$(wstunnel --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || true)
-info "Versione attiva: ${INSTALLED_VER}"
+info "Active version: ${INSTALLED_VER}"
 
 # =============================================================================
-# Generazione secret e secret-env
+# Secret generation
 # =============================================================================
 
-section "Configurazione secret"
+section "Secret configuration"
 
-# Il secret è la fonte di verità condivisa tra Caddy e wstunnel.
-# Caddy lo legge via {env.WSTUNNEL_SECRET} nel Caddyfile.
-# wstunnel lo legge via $WSTUNNEL_SECRET nell'ExecStart.
-# Entrambi usano EnvironmentFile=${SECRET_ENV_FILE}.
+# The secret is the shared source of truth between Caddy and wstunnel.
+# Caddy reads it via {env.WSTUNNEL_SECRET} in the Caddyfile.
+# wstunnel reads it via $WSTUNNEL_SECRET in ExecStart.
+# Both use EnvironmentFile=${SECRET_ENV_FILE}.
 #
-# Non viene rigenerato automaticamente — cambiarlo invalida tutti i client esistenti.
+# Not regenerated automatically — changing it invalidates all existing clients.
 
 mkdir -p "$WSTUNNEL_DIR"
 chmod 700 "$WSTUNNEL_DIR"
 
 if [[ -f "$WSTUNNEL_SECRET_FILE" ]]; then
-  success "Secret già presente — conservo quello esistente"
-  info "  (elimina ${WSTUNNEL_SECRET_FILE} e riesegui per rigenerarlo)"
+  success "Secret already present — keeping existing one"
+  info "  (delete ${WSTUNNEL_SECRET_FILE} and re-run to regenerate)"
 else
-  # 32 byte → 43 caratteri base64url senza padding — URL-safe
+  # 32 bytes → 43 base64url characters without padding — URL-safe
   openssl rand -base64 32 | tr '+/' '-_' | tr -d '=' > "$WSTUNNEL_SECRET_FILE"
   chmod 600 "$WSTUNNEL_SECRET_FILE"
-  success "Secret generato: ${WSTUNNEL_SECRET_FILE}"
+  success "Secret generated: ${WSTUNNEL_SECRET_FILE}"
 fi
 
 WSTUNNEL_SECRET=$(cat "$WSTUNNEL_SECRET_FILE")
-[[ -z "$WSTUNNEL_SECRET" ]] && error "Il file secret è vuoto."
-info "Secret (prefisso URL): ${WSTUNNEL_SECRET:0:8}…"
+[[ -z "$WSTUNNEL_SECRET" ]] && error "Secret file is empty."
+info "Secret (URL prefix): ${WSTUNNEL_SECRET:0:8}…"
 
-# Genera secret-env — formato EnvironmentFile systemd
+# Generate secret-env — systemd EnvironmentFile format
 printf 'WSTUNNEL_SECRET=%s\n' "$WSTUNNEL_SECRET" > "$SECRET_ENV_FILE"
 chmod 640 "$SECRET_ENV_FILE"
-success "secret-env generato: ${SECRET_ENV_FILE}"
+success "secret-env generated: ${SECRET_ENV_FILE}"
 
 # =============================================================================
-# Configurazione systemd
+# systemd configuration
 # =============================================================================
 
-section "Configurazione systemd"
+section "systemd configuration"
 
-# wstunnel gira come backend locale — non ha bisogno di:
-#   - leggere cert/key TLS (gestiti da Caddy)
-#   - aprire porte privilegiate (ascolta su 8080, non su 443)
-#   - setcap (CAP_NET_BIND_SERVICE non serve per porte > 1024)
+# wstunnel runs as a local backend — it does not need to:
+#   - read TLS cert/key (handled by Caddy)
+#   - bind privileged ports (listens on 8080, not 443)
+#   - setcap (CAP_NET_BIND_SERVICE not required for ports > 1024)
 #
-# Il secret viene iniettato tramite EnvironmentFile — non appare in chiaro
-# in `systemctl status` né nei log di journald.
+# The secret is injected via EnvironmentFile — it does not appear in plaintext
+# in `systemctl status` or journald logs.
 
 if ! id wstunnel > /dev/null 2>&1; then
   useradd --system --no-create-home --shell /usr/sbin/nologin wstunnel
-  success "Utente di sistema 'wstunnel' creato"
+  success "System user 'wstunnel' created"
 else
-  info "Utente 'wstunnel' già presente"
+  info "User 'wstunnel' already exists"
 fi
 
 chown root:wstunnel "$WSTUNNEL_DIR"
@@ -228,32 +228,32 @@ chmod 750 "$WSTUNNEL_DIR"
 chown root:wstunnel "$WSTUNNEL_SECRET_FILE" "$SECRET_ENV_FILE"
 chmod 640 "$WSTUNNEL_SECRET_FILE" "$SECRET_ENV_FILE"
 
-# Rimuovi setcap se era stato impostato da una versione precedente dello script
+# Remove setcap if it was set by a previous version of this script
 if command -v getcap > /dev/null 2>&1 && \
    getcap "$WSTUNNEL_BIN" 2>/dev/null | grep -q "cap_net_bind_service"; then
   setcap -r "$WSTUNNEL_BIN" \
-    && info "CAP_NET_BIND_SERVICE rimosso (non necessario per porta ${WSTUNNEL_INTERNAL_PORT})" \
-    || warn "Impossibile rimuovere setcap — non critico"
+    && info "CAP_NET_BIND_SERVICE removed (not needed for port ${WSTUNNEL_INTERNAL_PORT})" \
+    || warn "Could not remove setcap — non-critical"
 fi
 
 cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=wstunnel — WireGuard over WebSocket (backend locale)
+Description=wstunnel — WireGuard over WebSocket (local backend)
 Documentation=https://github.com/erebe/wstunnel
 After=network-online.target
 Wants=network-online.target
-# caddy-setup.sh aggiunge un drop-in override con After=caddy.service
+# caddy-setup.sh adds a drop-in override with After=caddy.service
 
 [Service]
 Type=simple
 User=wstunnel
 Group=wstunnel
 
-# Secret iniettato come variabile d'ambiente — non appare in chiaro nei log
+# Secret injected as environment variable — does not appear in plaintext in logs
 EnvironmentFile=${SECRET_ENV_FILE}
 
-# ws:// (no TLS) — la cifratura è delegata a Caddy sul fronte pubblico
-# 127.0.0.1 — non esposto su internet, solo loopback
+# ws:// (no TLS) — encryption delegated to Caddy on the public side
+# 127.0.0.1 — not exposed to the internet, loopback only
 ExecStart=${WSTUNNEL_BIN} server \\
   --restrict-to      127.0.0.1:${WG_PORT} \\
   --restrict-http-upgrade-path-prefix \${WSTUNNEL_SECRET} \\
@@ -300,10 +300,10 @@ systemctl daemon-reload
 
 if systemctl is-active --quiet wstunnel 2>/dev/null; then
   systemctl restart wstunnel
-  success "wstunnel.service riavviato"
+  success "wstunnel.service restarted"
 else
   systemctl enable --now wstunnel
-  success "wstunnel.service abilitato e avviato"
+  success "wstunnel.service enabled and started"
 fi
 
 for i in {1..10}; do
@@ -311,9 +311,9 @@ for i in {1..10}; do
   sleep 1
 done
 if systemctl is-active --quiet wstunnel; then
-  success "wstunnel.service attivo su ws://127.0.0.1:${WSTUNNEL_INTERNAL_PORT}"
+  success "wstunnel.service active on ws://127.0.0.1:${WSTUNNEL_INTERNAL_PORT}"
 else
-  error "wstunnel.service non è partito. Controlla: journalctl -u wstunnel -n 30"
+  error "wstunnel.service failed to start. Check: journalctl -u wstunnel -n 30"
 fi
 
 # =============================================================================
@@ -322,45 +322,45 @@ fi
 
 section "Firewall"
 
-# wstunnel non espone porte pubbliche — ascolta solo su loopback.
-# La porta TCP:443 è gestita da Caddy (caddy-setup.sh).
-info "wstunnel ascolta su 127.0.0.1:${WSTUNNEL_INTERNAL_PORT} — nessuna regola firewall necessaria"
-info "La porta TCP:443 pubblica verrà gestita da Caddy (caddy-setup.sh)"
+# wstunnel does not expose public ports — listens on loopback only.
+# TCP:443 is handled by Caddy (caddy-setup.sh).
+info "wstunnel listens on 127.0.0.1:${WSTUNNEL_INTERNAL_PORT} — no firewall rules needed"
+info "Public TCP:443 will be handled by Caddy (caddy-setup.sh)"
 
 # =============================================================================
-# Verifica connettività
+# Connectivity check
 # =============================================================================
 
-section "Verifica connettività"
+section "Connectivity check"
 
-info "Test wstunnel su 127.0.0.1:${WSTUNNEL_INTERNAL_PORT}..."
+info "Testing wstunnel on 127.0.0.1:${WSTUNNEL_INTERNAL_PORT}..."
 if ss -tlnp | grep -q "127.0.0.1:${WSTUNNEL_INTERNAL_PORT}"; then
-  success "wstunnel in ascolto su ws://127.0.0.1:${WSTUNNEL_INTERNAL_PORT}"
+  success "wstunnel listening on ws://127.0.0.1:${WSTUNNEL_INTERNAL_PORT}"
 else
-  warn "wstunnel non in ascolto — verifica: journalctl -u wstunnel -n 20"
+  warn "wstunnel not listening — check: journalctl -u wstunnel -n 20"
 fi
 
 # =============================================================================
-# Riepilogo finale
+# Summary
 # =============================================================================
 
-section "Setup completato"
+section "Setup complete"
 
-echo -e "  Binario       : ${BOLD}${WSTUNNEL_BIN}${NC} (v${INSTALLED_VER})"
+echo -e "  Binary        : ${BOLD}${WSTUNNEL_BIN}${NC} (v${INSTALLED_VER})"
 echo -e "  Secret file   : ${BOLD}${WSTUNNEL_SECRET_FILE}${NC}"
 echo -e "  Secret env    : ${BOLD}${SECRET_ENV_FILE}${NC}"
-echo -e "  Servizio      : ${BOLD}wstunnel.service${NC} (systemd, avvio automatico)"
-echo -e "  Ascolto       : ${BOLD}ws://127.0.0.1:${WSTUNNEL_INTERNAL_PORT}${NC} (solo loopback)"
-echo -e "  Destinazione  : ${BOLD}127.0.0.1:${WG_PORT}${NC} (WireGuard)"
+echo -e "  Service       : ${BOLD}wstunnel.service${NC} (systemd, auto-start)"
+echo -e "  Listening     : ${BOLD}ws://127.0.0.1:${WSTUNNEL_INTERNAL_PORT}${NC} (loopback only)"
+echo -e "  Destination   : ${BOLD}127.0.0.1:${WG_PORT}${NC} (WireGuard)"
 echo ""
-echo -e "${YELLOW}Prossimo passo obbligatorio:${NC}"
-echo "  Esegui caddy-setup.sh per installare il reverse proxy front-end:"
+echo -e "${YELLOW}Required next step:${NC}"
+echo "  Run caddy-setup.sh to install the front-end reverse proxy:"
 echo "    sudo ./caddy-setup.sh"
 echo ""
-echo "  Caddy si occuperà di:"
-echo "    - TLS termination su TCP:443"
-echo "    - Routing del traffico wstunnel sul path /<secret>"
-echo "    - Generazione del certificato per il certificate pinning client"
+echo "  Caddy will handle:"
+echo "    - TLS termination on TCP:443"
+echo "    - Routing wstunnel traffic to /<secret>"
+echo "    - Certificate generation for client certificate pinning"
 echo ""
-echo -e "${GREEN}Stato servizio:${NC}"
+echo -e "${GREEN}Service status:${NC}"
 systemctl status wstunnel --no-pager -l | head -20
