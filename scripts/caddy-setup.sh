@@ -125,8 +125,11 @@ get_public_ip() {
       -H "X-aws-ec2-metadata-token: $token" \
       "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
   fi
-  [[ -z "$ip" ]] && ip=$(curl -s --max-time 3 \
-    "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+  if [[ -z "$ip" ]]; then
+    echo -e "${YELLOW}[WARN]${NC}  IMDSv2 non disponibile — fallback su IMDSv1 (deprecato da AWS)." >&2
+    ip=$(curl -s --max-time 3 \
+      "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+  fi
   [[ -z "$ip" ]] && ip=$(curl -s --max-time 5 "https://api.ipify.org" 2>/dev/null || true)
   echo "$ip"
 }
@@ -204,11 +207,12 @@ if [[ "$REGEN_CERT" == true ]]; then
   # ma usa rustls che verifica SAN). Senza SAN il certificate pinning fallisce
   # sui client moderni anche con --tls-ca-certificate.
   openssl req -x509 \
-    -newkey rsa:4096 \
+    -newkey ec \
+    -pkeyopt ec_paramgen_curve:P-256 \
     -keyout "$CADDY_KEY" \
     -out    "$CADDY_CERT" \
     -days   "$CERT_DAYS" \
-    -nodes \
+    -noenc \
     -subj   "/CN=${SERVER_IP}" \
     -addext "subjectAltName=IP:${SERVER_IP}" \
     2>/dev/null
@@ -292,7 +296,9 @@ cat > "$CADDYFILE" << 'CADDYEOF'
 :443 {
     # TLS con certificato self-signed.
     # Fonte di verità per il certificate pinning dei client wstunnel.
-    tls /etc/caddy/tls/cert.pem /etc/caddy/tls/key.pem
+    tls /etc/caddy/tls/cert.pem /etc/caddy/tls/key.pem {
+        protocols tls1.3
+    }
 
     # ── Routing wstunnel ─────────────────────────────────────────────────────
     # Match: path che inizia con /<secret>/
@@ -308,6 +314,11 @@ cat > "$CADDYFILE" << 'CADDYEOF'
             # Propaga gli header di upgrade WebSocket al backend
             header_up Connection {http.request.header.Connection}
             header_up Upgrade {http.request.header.Upgrade}
+
+            # Forza HTTP/1.1 verso il backend — WebSocket non è compatibile con HTTP/2
+            transport http {
+                versions h1
+            }
         }
     }
 
@@ -366,8 +377,10 @@ else
   success "caddy.service abilitato e avviato"
 fi
 
-sleep 2
-
+for i in {1..10}; do
+  systemctl is-active --quiet caddy && break
+  sleep 1
+done
 if systemctl is-active --quiet caddy; then
   success "caddy.service attivo"
 else
@@ -427,7 +440,7 @@ echo -e "  Porta        : ${BOLD}TCP:${PUBLIC_PORT}${NC}"
 echo ""
 echo -e "  Routing:"
 echo -e "    /${WSTUNNEL_SECRET:0:8}…/* → ${BOLD}ws://${WSTUNNEL_BACKEND}${NC} (wstunnel)"
-echo -e"    /*            → ${BOLD}http://${WEBAPP_BACKEND}${NC} (webapp — 502 se non attivo)"
+echo -e "    /*            → ${BOLD}http://${WEBAPP_BACKEND}${NC} (webapp — 502 se non attivo)"
 echo ""
 echo -e "  ${YELLOW}wg-add-client.sh${NC} leggerà il certificato da ${BOLD}${CADDY_CERT}${NC}"
 echo ""
