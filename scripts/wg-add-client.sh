@@ -1,0 +1,770 @@
+#!/usr/bin/env bash
+# =============================================================================
+# wg-add-client.sh — Aggiunge un nuovo peer WireGuard in modo interattivo
+#
+# Uso:
+#   chmod +x wg-add-client.sh
+#   sudo ./wg-add-client.sh
+#
+# Prerequisiti: wg-setup.sh già eseguito con successo
+# Per modalità wstunnel: wstunnel-server-setup.sh e caddy-setup.sh già eseguiti
+# =============================================================================
+
+set -euo pipefail
+
+# ── Colori ────────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()    { echo -e "${BLUE}[INFO]${NC}  $*"; }
+success() { echo -e "${GREEN}[OK]${NC}    $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+section() { echo -e "\n${BOLD}━━━  $*  ━━━${NC}\n"; }
+
+# ── Controllo root ────────────────────────────────────────────────────────────
+[[ $EUID -ne 0 ]] && error "Eseguire con sudo: sudo ./wg-add-client.sh"
+
+umask 077
+
+# ── Costanti configurabili ────────────────────────────────────────────────────
+WG_DIR="/etc/wireguard"
+WG_CONF="${WG_DIR}/wg0.conf"
+OUTPUT_DIR="/root/wg-clients"
+
+HOME_SUBNET="192.168.68.0/22"
+
+WSTUNNEL_PORT=443
+WSTUNNEL_MTU=1300
+LOCAL_WSTUNNEL_PORT=51821
+
+# Percorsi infrastruttura wstunnel/Caddy
+# WSTUNNEL_CERT: certificato generato da caddy-setup.sh — unica fonte di verità
+# per il certificate pinning. Non usare più /etc/wstunnel/cert.pem.
+WSTUNNEL_CERT="/etc/caddy/tls/cert.pem"
+WSTUNNEL_SECRET_FILE="/etc/wstunnel/secret"
+
+# =============================================================================
+# Controlli preliminari
+# =============================================================================
+
+[[ ! -f "$WG_CONF" ]] && error "wg0.conf non trovato. Hai già eseguito wg-setup.sh?"
+[[ ! -f "${WG_DIR}/server_public.key" ]] && error "Chiavi server non trovate in ${WG_DIR}."
+
+if grep -qiE "^\s*SaveConfig\s*=\s*true" "$WG_CONF"; then
+  warn "SaveConfig = true rilevato in ${WG_CONF}."
+  read -rp "$(echo -e "${YELLOW}Disabilitarlo automaticamente ora? [Y/n]:${NC} ")" fix_save
+  if [[ "${fix_save,,}" == "y" || -z "$fix_save" ]]; then
+    sed -i 's/^\s*SaveConfig\s*=\s*true/SaveConfig = false/i' "$WG_CONF"
+    success "SaveConfig disabilitato in ${WG_CONF}."
+  else
+    error "Disabilita SaveConfig manualmente prima di procedere."
+  fi
+fi
+
+command -v curl > /dev/null || error "curl non installato."
+command -v wg   > /dev/null || error "WireGuard non installato."
+
+# ── Valori di rete estratti da wg0.conf ───────────────────────────────────────
+WG_PORT=$(awk -F= '/^[[:space:]]*ListenPort[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2; exit}' "$WG_CONF")
+VPN_SUBNET=$(awk -F= '/^[[:space:]]*Address[[:space:]]*=/ {gsub(/[[:space:]]/,"",$2); print $2; exit}' "$WG_CONF")
+
+[[ -z "$WG_PORT" ]]    && error "ListenPort non trovato in ${WG_CONF}."
+[[ -z "$VPN_SUBNET" ]] && error "Address non trovato in ${WG_CONF}."
+
+VPN_SUBNET=$(echo "$VPN_SUBNET" | sed 's|\([0-9]*\.[0-9]*\.[0-9]*\)\.[0-9]*/\([0-9]*\)|\1.0/\2|')
+VPN_PREFIX=$(echo "$VPN_SUBNET" | cut -d. -f1-3)
+
+VPN_CIDR="${VPN_SUBNET##*/}"
+if [[ "$VPN_CIDR" != "24" ]]; then
+  error "VPN_SUBNET /${VPN_CIDR} — questo script supporta solo /24."
+fi
+
+WG_IFACE=$(basename "$WG_CONF" .conf)
+
+info "Configurazione — Interfaccia: ${WG_IFACE}, Porta: ${WG_PORT}, Subnet VPN: ${VPN_SUBNET}"
+
+if command -v nft > /dev/null && ! command -v iptables-legacy > /dev/null 2>&1; then
+  warn "Sistema usa nftables nativo. Verifica il layer iptables-nft: iptables --version"
+fi
+
+QRENCODE_AVAILABLE=true
+if ! command -v qrencode > /dev/null; then
+  warn "qrencode non installato — tento l'installazione..."
+  if command -v apt-get > /dev/null; then
+    apt-get install -y qrencode || { warn "Installazione qrencode fallita."; QRENCODE_AVAILABLE=false; }
+  elif command -v dnf > /dev/null; then
+    dnf install -y qrencode || { warn "Installazione qrencode fallita."; QRENCODE_AVAILABLE=false; }
+  else
+    warn "Installa qrencode manualmente per generare il QR code."
+    QRENCODE_AVAILABLE=false
+  fi
+  [[ "$QRENCODE_AVAILABLE" == true ]] && success "qrencode installato"
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+# =============================================================================
+# Funzioni di utilità
+# =============================================================================
+
+get_used_ips() {
+  grep -E "^AllowedIPs" "$WG_CONF" \
+    | grep -oE "${VPN_PREFIX}\.[0-9]{1,3}" \
+    | sort -t. -k4 -n \
+    | uniq \
+    || true
+}
+
+next_available_ip() {
+  local used
+  used=$(get_used_ips)
+  for i in $(seq 3 254); do
+    local candidate="${VPN_PREFIX}.${i}"
+    if ! echo "$used" | grep -q "^${candidate}$"; then
+      echo "$candidate"
+      return
+    fi
+  done
+  error "Subnet VPN esaurita."
+}
+
+name_exists() {
+  [[ -f "${WG_DIR}/${1}_public.key" ]]
+}
+
+get_public_ip() {
+  local ip=""
+  local token
+  token=$(curl -s --max-time 3 -X PUT \
+    "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || true)
+  if [[ -n "$token" ]]; then
+    ip=$(curl -s --max-time 3 \
+      -H "X-aws-ec2-metadata-token: $token" \
+      "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+  fi
+  [[ -z "$ip" ]] && ip=$(curl -s --max-time 3 \
+    "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+  [[ -z "$ip" ]] && ip=$(curl -s --max-time 5 "https://api.ipify.org" 2>/dev/null || true)
+  echo "$ip"
+}
+
+# =============================================================================
+# Benvenuto e riepilogo stato attuale
+# =============================================================================
+
+clear
+echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
+echo -e "${BOLD}║      WireGuard — Aggiungi client         ║${NC}"
+echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
+echo ""
+
+SERVER_PUBLIC_IP=$(get_public_ip)
+USED_IPS=$(get_used_ips | tr '\n' ' ')
+NEXT_IP=$(next_available_ip)
+
+echo -e "  Peer configurati  :"
+peer_names=$(grep -E "^# PeerName:" "$WG_CONF" | sed 's/^# PeerName: //' || true)
+if [[ -z "$peer_names" ]]; then
+  echo -e "    (nessuno)"
+else
+  active_keys=""
+  if ip link show dev "$WG_IFACE" > /dev/null 2>&1; then
+    active_keys=$(wg show "$WG_IFACE" peers 2>/dev/null || true)
+  fi
+  while IFS= read -r peer_name; do
+    pub_key_file="${WG_DIR}/${peer_name}_public.key"
+    if [[ -f "$pub_key_file" ]]; then
+      pub_key=$(cat "$pub_key_file")
+      if echo "$active_keys" | grep -qF "$pub_key"; then
+        status="${GREEN}●${NC}"
+      else
+        status="${YELLOW}○${NC}"
+      fi
+    else
+      status="${BLUE}?${NC}"
+    fi
+    echo -e "    $(echo -e "$status") ${peer_name}"
+  done <<< "$peer_names"
+fi
+echo -e "  IP VPN in uso     : ${USED_IPS:-nessuno}"
+echo -e "  Prossimo IP libero: ${BOLD}${NEXT_IP}${NC}"
+echo ""
+
+# =============================================================================
+# Scelta tipo client
+# =============================================================================
+
+section "Tipo di client"
+echo "  1) Mobile / Laptop  — accede alla rete di casa e alla VPN"
+echo "  2) Gateway          — fa da router per un'altra rete locale (come il Pi)"
+echo ""
+
+while true; do
+  read -rp "$(echo -e "${YELLOW}Scegli [1/2]:${NC} ")" CLIENT_TYPE
+  case "$CLIENT_TYPE" in
+    1) CLIENT_TYPE="mobile";  break ;;
+    2) CLIENT_TYPE="gateway"; break ;;
+    *) warn "Inserire 1 o 2" ;;
+  esac
+done
+
+# =============================================================================
+# Modalità connessione (solo per client mobili)
+# =============================================================================
+
+USE_WSTUNNEL=false
+WSTUNNEL_CLIENT_OS="linux"
+
+if [[ "$CLIENT_TYPE" == "mobile" ]]; then
+  section "Modalità connessione"
+  echo "  1) Standard     — UDP:${WG_PORT} (default, massima compatibilità)"
+  echo "  2) wstunnel/TLS — TCP:${WSTUNNEL_PORT}, maschera il traffico WireGuard come HTTPS"
+  echo "                    Utile se UDP è bloccato o filtrato da un firewall"
+  echo ""
+
+  while true; do
+    read -rp "$(echo -e "${YELLOW}Modalità [1/2]:${NC} ")" conn_mode
+    case "$conn_mode" in
+      1) USE_WSTUNNEL=false; break ;;
+      2) USE_WSTUNNEL=true;  break ;;
+      *) warn "Inserire 1 o 2" ;;
+    esac
+  done
+
+  # ── Verifica prerequisiti wstunnel ────────────────────────────────────────
+  if [[ "$USE_WSTUNNEL" == true ]]; then
+
+    # Certificato: ora gestito da Caddy, non più da wstunnel direttamente
+    if [[ ! -f "$WSTUNNEL_CERT" ]]; then
+      error "Certificato Caddy non trovato: ${WSTUNNEL_CERT}\n\n  Esegui nell'ordine:\n    sudo ./wstunnel-server-setup.sh\n    sudo ./caddy-setup.sh"
+    fi
+
+    if [[ ! -f "$WSTUNNEL_SECRET_FILE" ]]; then
+      error "File secret non trovato: ${WSTUNNEL_SECRET_FILE}\n\n  Esegui prima:\n    sudo ./wstunnel-server-setup.sh"
+    fi
+
+    if ! openssl x509 -in "$WSTUNNEL_CERT" -noout -checkend 0 > /dev/null 2>&1; then
+      error "Il certificato Caddy in ${WSTUNNEL_CERT} è scaduto.\n  Rigenera con: sudo ./caddy-setup.sh"
+    fi
+
+    WSTUNNEL_SECRET=$(cat "$WSTUNNEL_SECRET_FILE")
+    [[ -z "$WSTUNNEL_SECRET" ]] && error "Il file secret ${WSTUNNEL_SECRET_FILE} è vuoto."
+
+    CERT_EXPIRY=$(openssl x509 -in "$WSTUNNEL_CERT" -noout -enddate 2>/dev/null \
+      | cut -d= -f2 || true)
+    success "Prerequisiti wstunnel/Caddy verificati (cert scade: ${CERT_EXPIRY})"
+
+    echo ""
+    echo "  Sistema operativo del client:"
+    echo "  1) Linux / WSL2   — PostUp/PostDown con iptables supportati"
+    echo "  2) Windows / macOS / iOS / Android — PostUp non supportato"
+    echo ""
+    while true; do
+      read -rp "$(echo -e "${YELLOW}OS client [1/2]:${NC} ")" os_choice
+      case "$os_choice" in
+        1) WSTUNNEL_CLIENT_OS="linux";    break ;;
+        2) WSTUNNEL_CLIENT_OS="nonlinux"; break ;;
+        *) warn "Inserire 1 o 2" ;;
+      esac
+    done
+  fi
+fi
+
+# =============================================================================
+# Nome del client
+# =============================================================================
+
+section "Nome del client"
+echo "  Solo lettere, numeri e trattini. Es: laptop-mario, iphone-sara, ufficio"
+echo ""
+
+while true; do
+  read -rp "$(echo -e "${YELLOW}Nome client:${NC} ")" CLIENT_NAME
+
+  if [[ -z "$CLIENT_NAME" ]]; then
+    warn "Il nome non può essere vuoto."
+    continue
+  fi
+  if ! [[ "$CLIENT_NAME" =~ ^[a-zA-Z0-9-]+$ ]]; then
+    warn "Solo lettere, numeri e trattini."
+    continue
+  fi
+  if name_exists "$CLIENT_NAME"; then
+    warn "Esiste già un client con nome '${CLIENT_NAME}'."
+    continue
+  fi
+  break
+done
+
+# =============================================================================
+# IP VPN
+# =============================================================================
+
+section "Indirizzo IP nella VPN"
+echo -e "  Prossimo IP disponibile: ${BOLD}${NEXT_IP}${NC}"
+echo "  Premi INVIO per accettarlo, oppure inseriscine uno manuale."
+echo ""
+
+while true; do
+  read -rp "$(echo -e "${YELLOW}IP VPN [${NEXT_IP}]:${NC} ")" CLIENT_IP
+  CLIENT_IP="${CLIENT_IP:-$NEXT_IP}"
+
+  if ! [[ "$CLIENT_IP" =~ ^${VPN_PREFIX//./\.}\.([0-9]{1,3})$ ]]; then
+    warn "Formato non valido. Usa un IP nella forma ${VPN_PREFIX}.X"
+    continue
+  fi
+
+  OCTET="${BASH_REMATCH[1]}"
+  if [[ "$OCTET" -lt 2 || "$OCTET" -gt 254 ]]; then
+    warn "Il quarto ottetto deve essere tra 2 e 254."
+    continue
+  fi
+
+  if echo "$(get_used_ips)" | grep -q "^${CLIENT_IP}$"; then
+    warn "IP ${CLIENT_IP} già in uso."
+    continue
+  fi
+  break
+done
+
+# =============================================================================
+# Configurazione gateway
+# =============================================================================
+
+GATEWAY_SUBNET=""
+GATEWAY_IFACE="eth0"
+GATEWAY_REACH_HOME=false
+GATEWAY_ALLOWED_IPS=""
+
+if [[ "$CLIENT_TYPE" == "gateway" ]]; then
+  section "Configurazione gateway"
+  echo "  Inserisci la subnet da rendere raggiungibile via VPN. Es: 192.168.1.0/24"
+  echo ""
+
+  while true; do
+    read -rp "$(echo -e "${YELLOW}Subnet locale del gateway:${NC} ")" GATEWAY_SUBNET
+    if ! [[ "$GATEWAY_SUBNET" =~ ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\/(([0-9]|[12][0-9]|3[0-2]))$ ]]; then
+      warn "Formato non valido. Usa notazione CIDR, es: 192.168.1.0/24"
+      continue
+    fi
+    [[ "$GATEWAY_SUBNET" == "$VPN_SUBNET" ]] && { warn "Collisione con VPN_SUBNET."; continue; }
+    [[ "$GATEWAY_SUBNET" == "$HOME_SUBNET" ]] && { warn "Collisione con HOME_SUBNET."; continue; }
+    break
+  done
+
+  echo ""
+  read -rp "$(echo -e "${YELLOW}Interfaccia di rete locale del gateway [eth0]:${NC} ")" GATEWAY_IFACE
+  GATEWAY_IFACE="${GATEWAY_IFACE:-eth0}"
+
+  echo ""
+  GATEWAY_REACH_HOME=false
+  while true; do
+    read -rp "$(echo -e "${YELLOW}Raggiungere HOME_SUBNET (${HOME_SUBNET})? [y/N]:${NC} ")" reach_home
+    case "${reach_home,,}" in
+      y|yes) GATEWAY_REACH_HOME=true;  break ;;
+      n|no|"") GATEWAY_REACH_HOME=false; break ;;
+      *) warn "Rispondere y oppure N" ;;
+    esac
+  done
+fi
+
+# =============================================================================
+# DNS (solo client mobili)
+# =============================================================================
+
+CLIENT_DNS="1.1.1.1"
+if [[ "$CLIENT_TYPE" == "mobile" ]]; then
+  section "DNS"
+  echo "  Default: 1.1.1.1 (Cloudflare). Puoi usare il router di casa per hostname locali."
+  echo ""
+  read -rp "$(echo -e "${YELLOW}DNS [1.1.1.1]:${NC} ")" CLIENT_DNS
+  CLIENT_DNS="${CLIENT_DNS:-1.1.1.1}"
+fi
+
+# =============================================================================
+# Riepilogo e conferma
+# =============================================================================
+
+section "Riepilogo"
+echo -e "  Nome          : ${BOLD}${CLIENT_NAME}${NC}"
+echo -e "  Tipo          : ${BOLD}${CLIENT_TYPE}${NC}"
+echo -e "  IP VPN        : ${BOLD}${CLIENT_IP}/32${NC}"
+
+if [[ "$CLIENT_TYPE" == "mobile" ]]; then
+  MODALITA=$([ "$USE_WSTUNNEL" == true ] \
+    && echo "wstunnel/TLS via Caddy (TCP:${WSTUNNEL_PORT}, certificate pinning)" \
+    || echo "Standard (UDP:${WG_PORT})")
+  echo -e "  Modalità      : ${BOLD}${MODALITA}${NC}"
+  [[ "$USE_WSTUNNEL" == true ]] && \
+    echo -e "  MTU           : ${BOLD}${WSTUNNEL_MTU}${NC}"
+  echo -e "  AllowedIPs    : ${BOLD}${VPN_SUBNET}, ${HOME_SUBNET}${NC}"
+  echo -e "  DNS           : ${BOLD}${CLIENT_DNS}${NC}"
+else
+  echo -e "  Subnet locale : ${BOLD}${GATEWAY_SUBNET}${NC}"
+  echo -e "  Interfaccia   : ${BOLD}${GATEWAY_IFACE}${NC}"
+  echo -e "  Raggiunge casa: ${BOLD}$([ "$GATEWAY_REACH_HOME" == true ] && echo 'Sì' || echo 'No')${NC}"
+fi
+
+echo ""
+read -rp "$(echo -e "${YELLOW}Confermi? [y/N]:${NC} ")" confirm
+[[ "${confirm,,}" == "y" ]] || { info "Operazione annullata."; exit 0; }
+
+# =============================================================================
+# Generazione chiavi
+# =============================================================================
+
+section "Generazione chiavi"
+
+CLIENT_PRIV=$(wg genkey)
+CLIENT_PUB=$(echo "$CLIENT_PRIV" | wg pubkey)
+CLIENT_PSK=$(wg genpsk)
+SERVER_PUB=$(cat "${WG_DIR}/server_public.key")
+
+echo "$CLIENT_PUB" > "${WG_DIR}/${CLIENT_NAME}_public.key"
+CLIENT_PSK_FILE="${WG_DIR}/${CLIENT_NAME}_psk.key"
+echo "$CLIENT_PSK" > "$CLIENT_PSK_FILE"
+chmod 600 "$CLIENT_PSK_FILE"
+
+success "Chiavi generate (chiave privata client solo in RAM)"
+
+# =============================================================================
+# Aggiunta peer a wg0.conf
+# =============================================================================
+
+section "Aggiornamento wg0.conf"
+
+[[ -s "$WG_CONF" ]] && \
+  [[ "$(tail -c1 "$WG_CONF" | od -An -tx1 | tr -d ' ')" != "0a" ]] && \
+  printf '\n' >> "$WG_CONF"
+
+if [[ "$CLIENT_TYPE" == "mobile" ]]; then
+  ALLOWED_IPS_SERVER="${CLIENT_IP}/32"
+else
+  if [[ "$GATEWAY_REACH_HOME" == true ]]; then
+    ALLOWED_IPS_SERVER="${CLIENT_IP}/32, ${GATEWAY_SUBNET}"
+    GATEWAY_ALLOWED_IPS="${VPN_SUBNET}, ${HOME_SUBNET}"
+  else
+    ALLOWED_IPS_SERVER="${CLIENT_IP}/32, ${GATEWAY_SUBNET}"
+    GATEWAY_ALLOWED_IPS="${VPN_SUBNET}"
+  fi
+fi
+
+cat >> "$WG_CONF" << EOF
+
+# PeerName: ${CLIENT_NAME}
+# PeerIP: ${CLIENT_IP}
+# PeerType: ${CLIENT_TYPE}
+[Peer]
+PublicKey = ${CLIENT_PUB}
+PresharedKey = ${CLIENT_PSK}
+AllowedIPs = ${ALLOWED_IPS_SERVER}
+EOF
+
+success "Peer aggiunto a wg0.conf"
+
+# =============================================================================
+# Hot-reload del peer
+# =============================================================================
+
+section "Attivazione peer"
+
+if ip link show dev "$WG_IFACE" > /dev/null 2>&1; then
+  wg set "$WG_IFACE" peer "$CLIENT_PUB" \
+    preshared-key <(echo "$CLIENT_PSK") \
+    allowed-ips "$ALLOWED_IPS_SERVER"
+
+  if [[ "$CLIENT_TYPE" == "gateway" && -n "$GATEWAY_SUBNET" ]]; then
+    ip route replace "$GATEWAY_SUBNET" dev "$WG_IFACE"
+    info "Route kernel aggiornata: ${GATEWAY_SUBNET} → ${WG_IFACE}"
+  fi
+
+  success "Peer attivato a caldo — nessuna disconnessione per gli altri client"
+else
+  warn "Tunnel non attivo. Il peer sarà caricato al prossimo avvio di WireGuard."
+fi
+
+# =============================================================================
+# Generazione file .conf client
+# =============================================================================
+
+section "Generazione configurazione client"
+
+SERVER_IP_FOR_ENDPOINT="${SERVER_PUBLIC_IP}"
+[[ -z "$SERVER_IP_FOR_ENDPOINT" ]] && SERVER_IP_FOR_ENDPOINT=$(get_public_ip)
+[[ -z "$SERVER_IP_FOR_ENDPOINT" ]] && error "Impossibile determinare l'IP pubblico."
+
+CONF_FILE="${OUTPUT_DIR}/${CLIENT_NAME}.conf"
+
+if [[ "$CLIENT_TYPE" == "mobile" ]]; then
+
+  if [[ "$USE_WSTUNNEL" == true ]]; then
+    server_ip_prefix2=$(echo "$SERVER_IP_FOR_ENDPOINT" | cut -d. -f1-2)
+    vpn_prefix2_check=$(echo "$VPN_SUBNET" | cut -d. -f1-2)
+    home_prefix2_check=$(echo "$HOME_SUBNET" | cut -d. -f1-2)
+    if [[ "$server_ip_prefix2" == "$vpn_prefix2_check" || \
+          "$server_ip_prefix2" == "$home_prefix2_check" ]]; then
+      warn "L'IP del server potrebbe essere coperto da AllowedIPs — verifica loop di routing."
+    fi
+
+    if [[ "$WSTUNNEL_CLIENT_OS" == "linux" ]]; then
+      WSTUNNEL_POSTUP="PostUp   = iptables -t mangle -C FORWARD -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+      WSTUNNEL_POSTDOWN="PostDown = iptables -t mangle -D FORWARD -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null"
+      WSTUNNEL_MSS_COMMENT="# MSS Clamping — previene frammentazione TCP da overhead TLS+WebSocket."
+    else
+      WSTUNNEL_POSTUP="# PostUp non supportato su questo OS — MSS clamping va configurato lato server."
+      WSTUNNEL_POSTDOWN=""
+      WSTUNNEL_MSS_COMMENT="# NOTA: su Linux il MSS clamping si configura con iptables -t mangle TCPMSS --clamp-mss-to-pmtu"
+    fi
+
+    cat > "$CONF_FILE" << EOF
+# Modalità wstunnel/TLS via Caddy — traffico WireGuard dentro WebSocket su TLS
+# PRIMA di wg-quick up: avvia wstunnel con il comando nel README del pacchetto.
+# ATTENZIONE: non cambiare AllowedIPs a 0.0.0.0/0 — loop di routing infinito.
+
+[Interface]
+PrivateKey = ${CLIENT_PRIV}
+Address = ${CLIENT_IP}/32
+DNS = ${CLIENT_DNS}
+MTU = ${WSTUNNEL_MTU}
+${WSTUNNEL_MSS_COMMENT}
+${WSTUNNEL_POSTUP}
+${WSTUNNEL_POSTDOWN}
+
+[Peer]
+PublicKey = ${SERVER_PUB}
+PresharedKey = ${CLIENT_PSK}
+AllowedIPs = ${VPN_SUBNET}, ${HOME_SUBNET}
+PersistentKeepalive = 25
+Endpoint = 127.0.0.1:${LOCAL_WSTUNNEL_PORT}
+EOF
+
+  else
+    cat > "$CONF_FILE" << EOF
+[Interface]
+PrivateKey = ${CLIENT_PRIV}
+Address = ${CLIENT_IP}/32
+DNS = ${CLIENT_DNS}
+MTU = 1420
+
+[Peer]
+PublicKey = ${SERVER_PUB}
+PresharedKey = ${CLIENT_PSK}
+AllowedIPs = ${VPN_SUBNET}, ${HOME_SUBNET}
+PersistentKeepalive = 25
+Endpoint = ${SERVER_IP_FOR_ENDPOINT}:${WG_PORT}
+EOF
+  fi
+
+else
+  cat > "$CONF_FILE" << EOF
+# Copiare in /etc/wireguard/wg0.conf sul gateway
+[Interface]
+Address = ${CLIENT_IP}/32
+PrivateKey = ${CLIENT_PRIV}
+MTU = 1420
+PostUp = iptables -t filter -C FORWARD -i ${WG_IFACE} -j ACCEPT 2>/dev/null || iptables -A FORWARD -i ${WG_IFACE} -j ACCEPT
+PostUp = iptables -t filter -C FORWARD -o ${WG_IFACE} -j ACCEPT 2>/dev/null || iptables -A FORWARD -o ${WG_IFACE} -j ACCEPT
+PostUp = iptables -t nat -C POSTROUTING -o ${GATEWAY_IFACE} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o ${GATEWAY_IFACE} -j MASQUERADE
+PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT 2>/dev/null
+PostDown = iptables -D FORWARD -o ${WG_IFACE} -j ACCEPT 2>/dev/null
+PostDown = iptables -t nat -D POSTROUTING -o ${GATEWAY_IFACE} -j MASQUERADE 2>/dev/null
+
+[Peer]
+PublicKey = ${SERVER_PUB}
+PresharedKey = ${CLIENT_PSK}
+AllowedIPs = ${GATEWAY_ALLOWED_IPS}
+PersistentKeepalive = 25
+Endpoint = ${SERVER_IP_FOR_ENDPOINT}:${WG_PORT}
+EOF
+fi
+
+success "File conf generato: ${CONF_FILE}"
+
+# =============================================================================
+# Pacchetto wstunnel (.tar.gz con cert Caddy, conf e README)
+# =============================================================================
+
+WSTUNNEL_PACKAGE=""
+
+if [[ "$CLIENT_TYPE" == "mobile" && "$USE_WSTUNNEL" == true ]]; then
+  section "Generazione pacchetto wstunnel"
+
+  PKG_TMPDIR=$(mktemp -d)
+  trap 'rm -rf "$PKG_TMPDIR"' EXIT
+  PKG_DIR="${PKG_TMPDIR}/${CLIENT_NAME}-wstunnel"
+  mkdir -p "$PKG_DIR"
+
+  # 1. File conf WireGuard
+  cp "$CONF_FILE" "${PKG_DIR}/${CLIENT_NAME}.conf"
+
+  # 2. Certificato Caddy — fonte di verità per il certificate pinning
+  #    Non più /etc/wstunnel/cert.pem: ora è Caddy a gestire il TLS
+  cp "$WSTUNNEL_CERT" "${PKG_DIR}/server-cert.pem"
+  chmod 644 "${PKG_DIR}/server-cert.pem"
+
+  WSTUNNEL_LATEST_VER=$(curl -s \
+    "https://api.github.com/repos/erebe/wstunnel/releases/latest" \
+    | grep -oP '"tag_name": "v\K[^"]+' 2>/dev/null || echo "10.5.2")
+
+  cat > "${PKG_DIR}/README.txt" << README
+==============================================================
+  WireGuard via wstunnel — Client: ${CLIENT_NAME}
+==============================================================
+
+IP VPN     : ${CLIENT_IP}/32
+Server     : ${SERVER_IP_FOR_ENDPOINT}:${WSTUNNEL_PORT}
+OS previsto: ${WSTUNNEL_CLIENT_OS}
+
+ARCHITETTURA SERVER
+--------------------
+  Internet → Caddy :443 (TLS) → wstunnel :8080 → WireGuard :${WG_PORT}
+  Il certificato incluso è quello di Caddy — è l'unico punto TLS visibile
+  dall'esterno.
+
+CONTENUTO DEL PACCHETTO
+------------------------
+  ${CLIENT_NAME}.conf   — configurazione WireGuard (contiene chiave privata!)
+  server-cert.pem       — certificato TLS di Caddy (per certificate pinning)
+  README.txt            — questo file
+
+INSTALLAZIONE WSTUNNEL (una sola volta)
+-----------------------------------------
+Linux / WSL2 (amd64):
+
+  WSTUNNEL_VER="${WSTUNNEL_LATEST_VER}"
+  curl -L -o /tmp/wstunnel.tar.gz \\
+    "https://github.com/erebe/wstunnel/releases/download/v\${WSTUNNEL_VER}/wstunnel_\${WSTUNNEL_VER}_linux_amd64.tar.gz"
+  tar xzf /tmp/wstunnel.tar.gz -C /tmp/
+  chmod +x /tmp/wstunnel
+  sudo mv /tmp/wstunnel /usr/local/bin/wstunnel
+  wstunnel --version
+
+Windows / macOS:
+  Scarica da: https://github.com/erebe/wstunnel/releases/latest
+
+AVVIO SESSIONE VPN (ordine obbligatorio)
+-----------------------------------------
+
+PASSO 1 — Terminale 1: avvia wstunnel (tienilo aperto per tutta la sessione)
+
+  wstunnel client \\
+    --tls-ca-certificate /percorso/a/server-cert.pem \\
+    --http-upgrade-path-prefix "${WSTUNNEL_SECRET}" \\
+    --websocket-ping-frequency-sec 30 \\
+    -L "udp://127.0.0.1:${LOCAL_WSTUNNEL_PORT}:127.0.0.1:${WG_PORT}?timeout_sec=0" \\
+    wss://${SERVER_IP_FOR_ENDPOINT}:${WSTUNNEL_PORT}
+
+  Sostituisci /percorso/a/server-cert.pem con il path assoluto di server-cert.pem.
+
+  Opzione senza certificate pinning (meno sicuro):
+    Sostituisci --tls-ca-certificate ... con --tls-insecure
+
+PASSO 2 — Terminale 2: attiva WireGuard
+
+  sudo wg-quick up /percorso/a/${CLIENT_NAME}.conf
+
+SPEGNIMENTO
+------------
+  sudo wg-quick down /percorso/a/${CLIENT_NAME}.conf
+  Ctrl+C nel Terminale 1  (o: pkill -f "wstunnel client")
+
+VERIFICA
+---------
+  ss -ulnp | grep ${LOCAL_WSTUNNEL_PORT}   # wstunnel in ascolto?
+  sudo wg show                              # sessione WireGuard?
+  ping ${VPN_PREFIX}.1                      # ping al server VPN
+
+NOTA MTU
+---------
+  MTU=${WSTUNNEL_MTU} — ridotto da 1420 per overhead TLS+WebSocket.
+  Gli altri peer WireGuard non sono toccati.
+
+SICUREZZA
+----------
+  Questo pacchetto contiene la chiave privata WireGuard.
+  Eliminalo dopo aver copiato i file:
+    rm -rf /percorso/a/${CLIENT_NAME}-wstunnel/
+
+  Il secret nell'URL è equivalente a una password: non condividerlo.
+  Il server (Caddy) accetta connessioni SOLO dal path con il secret corretto.
+  wstunnel compie una seconda verifica indipendente (difesa in profondità).
+==============================================================
+README
+
+  WSTUNNEL_PACKAGE="${OUTPUT_DIR}/${CLIENT_NAME}-wstunnel.tar.gz"
+  tar czf "$WSTUNNEL_PACKAGE" -C "$PKG_TMPDIR" "${CLIENT_NAME}-wstunnel/"
+  chmod 600 "$WSTUNNEL_PACKAGE"
+
+  success "Pacchetto generato: ${WSTUNNEL_PACKAGE}"
+  info "Contenuto:"
+  tar tzf "$WSTUNNEL_PACKAGE" | sed 's/^/    /'
+fi
+
+# =============================================================================
+# QR code
+# =============================================================================
+
+echo ""
+if [[ "$USE_WSTUNNEL" == true ]]; then
+  info "QR code non generato — modalità wstunnel richiede setup in due passi."
+elif [[ "$QRENCODE_AVAILABLE" == false ]]; then
+  warn "QR code non generato — qrencode non disponibile."
+else
+  echo -e "${BOLD}QR code — ${CLIENT_NAME} (${CLIENT_IP})${NC}"
+  echo "────────────────────────────────────────────────────────"
+  qrencode -t ansiutf8 -m 2 < "$CONF_FILE"
+  echo "────────────────────────────────────────────────────────"
+fi
+
+# =============================================================================
+# Riepilogo finale
+# =============================================================================
+
+section "Fatto"
+
+echo -e "  Client ${BOLD}${CLIENT_NAME}${NC} aggiunto con successo."
+echo ""
+echo -e "  File conf : ${BOLD}${CONF_FILE}${NC}"
+if [[ -n "$WSTUNNEL_PACKAGE" ]]; then
+  echo -e "  Pacchetto : ${BOLD}${WSTUNNEL_PACKAGE}${NC}"
+  echo -e "             (conf + server-cert.pem [Caddy] + README.txt)"
+fi
+echo ""
+
+if [[ "$CLIENT_TYPE" == "gateway" ]]; then
+  echo -e "${YELLOW}Prossimi passi sul gateway remoto:${NC}"
+  echo "  scp ${CONF_FILE} user@<IP_GATEWAY>:/tmp/"
+  echo "  sudo mv /tmp/${CLIENT_NAME}.conf /etc/wireguard/wg0.conf"
+  echo "  sudo chmod 600 /etc/wireguard/wg0.conf"
+  echo "  sudo apt install wireguard iptables -y"
+  echo "  echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.conf && sudo sysctl -p"
+  echo "  sudo systemctl enable --now wg-quick@wg0"
+  echo ""
+fi
+
+if [[ "$CLIENT_TYPE" == "mobile" && "$USE_WSTUNNEL" == true ]]; then
+  echo -e "${BOLD}━━━  Prossimi passi — wstunnel  ━━━${NC}"
+  echo ""
+  echo -e "  1. Trasferisci il pacchetto sul client:"
+  echo -e "     ${BOLD}scp ${WSTUNNEL_PACKAGE} user@<IP_CLIENT>:~/${NC}"
+  echo ""
+  echo -e "  2. Estrai ed esegui:"
+  echo -e "     ${BOLD}tar xzf ${CLIENT_NAME}-wstunnel.tar.gz${NC}"
+  echo -e "     Segui ${BOLD}${CLIENT_NAME}-wstunnel/README.txt${NC}"
+  echo ""
+fi
+
+echo ""
+echo -e "${RED}Sicurezza: i file generati contengono chiavi private.${NC}"
+echo -e "${RED}Eliminare dopo il trasferimento:${NC}"
+[[ -n "$WSTUNNEL_PACKAGE" ]] && echo -e "${RED}  rm ${WSTUNNEL_PACKAGE}${NC}"
+echo -e "${RED}  rm ${CONF_FILE}${NC}"
+echo ""
+
+wg show "$WG_IFACE" 2>/dev/null || true
