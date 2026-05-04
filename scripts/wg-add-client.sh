@@ -148,8 +148,10 @@ get_public_ip() {
       -H "X-aws-ec2-metadata-token: $token" \
       "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
   fi
-  [[ -z "$ip" ]] && ip=$(curl -s --max-time 3 \
-    "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+  if [[ -z "$ip" ]]; then
+    warn "IMDSv2 non disponibile — tentativo IMDSv1 (può fallire su istanze con IMDSv1 disabilitato)."
+    ip=$(curl -s --max-time 3 "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+  fi
   [[ -z "$ip" ]] && ip=$(curl -s --max-time 5 "https://api.ipify.org" 2>/dev/null || true)
   echo "$ip"
 }
@@ -439,6 +441,9 @@ success "Chiavi generate (chiave privata client solo in RAM)"
 
 section "Aggiornamento wg0.conf"
 
+WG_CONF_BAK="${WG_CONF}.bak.$(date +%s)"
+cp "$WG_CONF" "$WG_CONF_BAK"
+
 [[ -s "$WG_CONF" ]] && \
   [[ "$(tail -c1 "$WG_CONF" | od -An -tx1 | tr -d ' ')" != "0a" ]] && \
   printf '\n' >> "$WG_CONF"
@@ -466,6 +471,7 @@ PresharedKey = ${CLIENT_PSK}
 AllowedIPs = ${ALLOWED_IPS_SERVER}
 EOF
 
+rm -f "$WG_CONF_BAK"
 success "Peer aggiunto a wg0.conf"
 
 # =============================================================================
@@ -608,9 +614,13 @@ if [[ "$CLIENT_TYPE" == "mobile" && "$USE_WSTUNNEL" == true ]]; then
   cp "$WSTUNNEL_CERT" "${PKG_DIR}/server-cert.pem"
   chmod 644 "${PKG_DIR}/server-cert.pem"
 
-  WSTUNNEL_LATEST_VER=$(curl -s \
+  WSTUNNEL_LATEST_VER=$(curl -s --max-time 5 \
     "https://api.github.com/repos/erebe/wstunnel/releases/latest" \
-    | grep -oP '"tag_name": "v\K[^"]+' 2>/dev/null || echo "10.5.2")
+    | grep -Eo '"tag_name": "v[^"]+"' | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' || true)
+  if [[ -z "$WSTUNNEL_LATEST_VER" ]]; then
+    WSTUNNEL_LATEST_VER="10.5.4"
+    warn "GitHub API non raggiungibile — versione wstunnel nel README: ${WSTUNNEL_LATEST_VER} (verifica l'ultima su github.com/erebe/wstunnel/releases)."
+  fi
 
   cat > "${PKG_DIR}/README.txt" << README
 ==============================================================
