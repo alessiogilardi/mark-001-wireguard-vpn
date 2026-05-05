@@ -7,7 +7,7 @@
 #   sudo ./wg-add-client.sh
 #
 # Prerequisites: wg-setup.sh already run successfully
-# For wstunnel mode: wg-tunnel-server-setup.sh and caddy-setup.sh already run
+# For wstunnel mode: wstunnel-server-setup.sh and caddy-setup.sh already run
 # =============================================================================
 
 set -euo pipefail
@@ -244,11 +244,11 @@ if [[ "$CLIENT_TYPE" == "mobile" ]]; then
 
     # Certificate: now managed by Caddy, no longer by wstunnel directly
     if [[ ! -f "$WSTUNNEL_CERT" ]]; then
-      error "Caddy certificate not found: ${WSTUNNEL_CERT}\n\n  Run in order:\n    sudo ./wg-tunnel-server-setup.sh\n    sudo ./caddy-setup.sh"
+      error "Caddy certificate not found: ${WSTUNNEL_CERT}\n\n  Run in order:\n    sudo ./wstunnel-server-setup.sh\n    sudo ./caddy-setup.sh"
     fi
 
     if [[ ! -f "$WSTUNNEL_SECRET_FILE" ]]; then
-      error "Secret file not found: ${WSTUNNEL_SECRET_FILE}\n\n  Run first:\n    sudo ./wg-tunnel-server-setup.sh"
+      error "Secret file not found: ${WSTUNNEL_SECRET_FILE}\n\n  Run first:\n    sudo ./wstunnel-server-setup.sh"
     fi
 
     if ! openssl x509 -in "$WSTUNNEL_CERT" -noout -checkend 0 > /dev/null 2>&1; then

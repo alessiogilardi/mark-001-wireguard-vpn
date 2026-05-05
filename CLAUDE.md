@@ -16,7 +16,7 @@ The scripts have mandatory ordering:
 
 1. `scripts/wg-setup.sh` — installs WireGuard, generates keys, writes `/etc/wireguard/wg0.conf`, generates client configs and QR codes. Run this first on the Lightsail instance.
 2. `scripts/wg-add-client.sh` — adds a single new peer interactively (hot-reload with `wg set`, no downtime). Requires step 1. For wstunnel mode, also requires steps 3 and 4.
-3. `scripts/wg-tunnel-server-setup.sh` — installs wstunnel v10 binary, generates `/etc/wstunnel/secret` and `/etc/wstunnel/secret-env`, creates systemd unit listening on `ws://127.0.0.1:8080`. Optional; only needed if clients require wstunnel/TLS mode.
+3. `scripts/wstunnel-server-setup.sh` — installs wstunnel v10 binary, generates `/etc/wstunnel/secret` and `/etc/wstunnel/secret-env`, creates systemd unit listening on `ws://127.0.0.1:8080`. Optional; only needed if clients require wstunnel/TLS mode.
 4. `scripts/caddy-setup.sh` — installs Caddy, generates self-signed EC P-256 cert at `/etc/caddy/tls/cert.pem`, writes Caddyfile. Must run after step 3. Caddy terminates TLS on TCP:443 and reverse-proxies to wstunnel.
 
 All scripts require `sudo` and are idempotent.

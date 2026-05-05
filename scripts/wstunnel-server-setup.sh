@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# wg-tunnel-server-setup.sh — Install wstunnel v10 and generate the shared secret
+# wstunnel-server-setup.sh — Install wstunnel v10 and generate the shared secret
 #
 # Usage:
-#   chmod +x wg-tunnel-server-setup.sh
-#   sudo ./wg-tunnel-server-setup.sh
+#   chmod +x wstunnel-server-setup.sh
+#   sudo ./wstunnel-server-setup.sh
 #
 # Prerequisites:
 #   - WireGuard already installed and running on UDP:51820
@@ -35,7 +35,7 @@ error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 section() { echo -e "\n${BOLD}━━━  $*  ━━━${NC}\n"; }
 
 # ── Root check ────────────────────────────────────────────────────────────────
-[[ $EUID -ne 0 ]] && error "Run with sudo: sudo ./wg-tunnel-server-setup.sh"
+[[ $EUID -ne 0 ]] && error "Run with sudo: sudo ./wstunnel-server-setup.sh"
 
 umask 077
 

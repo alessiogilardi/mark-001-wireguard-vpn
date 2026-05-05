@@ -122,7 +122,7 @@ Only needed if clients must bypass UDP-blocking firewalls.
 #### 4a — Install wstunnel backend
 
 ```bash
-sudo bash wg-tunnel-server-setup.sh
+sudo bash wstunnel-server-setup.sh
 ```
 
 Downloads the latest wstunnel v10 binary from GitHub (SHA-256 verified), generates `/etc/wstunnel/secret`, and starts `wstunnel.service` listening on `ws://127.0.0.1:8080`.
@@ -238,7 +238,7 @@ systemctl status wg-quick@wg0
 This invalidates **all existing wstunnel clients** — they must receive new packages.
 ```bash
 sudo rm /etc/wstunnel/secret
-sudo bash wg-tunnel-server-setup.sh
+sudo bash wstunnel-server-setup.sh
 sudo systemctl restart wstunnel caddy
 # Re-run wg-add-client.sh for each wstunnel peer
 ```
