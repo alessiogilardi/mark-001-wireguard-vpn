@@ -153,11 +153,11 @@ else
   apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl \
     > /dev/null 2>&1
 
-  curl -s "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" \
+  curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" \
     | gpg --batch --yes --dearmor \
     -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 
-  curl -s "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" \
+  echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
     > /etc/apt/sources.list.d/caddy-stable.list
 
   apt-get update -qq
