@@ -123,7 +123,7 @@ fi
 if [[ "$INSTALL_WSTUNNEL" == "true" ]]; then
   TARBALL_NAME="wstunnel_${WSTUNNEL_VERSION}_linux_${WSTUNNEL_ARCH}.tar.gz"
   DOWNLOAD_URL="https://github.com/erebe/wstunnel/releases/download/v${WSTUNNEL_VERSION}/${TARBALL_NAME}"
-  CHECKSUM_URL="https://github.com/erebe/wstunnel/releases/download/v${WSTUNNEL_VERSION}/wstunnel_${WSTUNNEL_VERSION}_checksums.txt"
+  CHECKSUM_URL="https://github.com/erebe/wstunnel/releases/download/v${WSTUNNEL_VERSION}/checksums.txt"
 
   TMPDIR_WS=$(mktemp -d)
   trap 'rm -rf "$TMPDIR_WS"' EXIT
