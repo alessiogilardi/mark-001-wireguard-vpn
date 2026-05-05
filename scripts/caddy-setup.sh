@@ -144,7 +144,9 @@ success "Public IP: ${SERVER_IP}"
 
 section "Caddy installation"
 
-# Official Caddy repository — the Ubuntu apt package is outdated.
+# Official Caddy apt repository.
+# Note: umask 077 (set above) would make the keyring file 600, inaccessible
+# to the _apt user that runs apt update. chmod o+r corrects this.
 if command -v caddy > /dev/null 2>&1; then
   CADDY_INSTALLED_VER=$(caddy version 2>/dev/null | grep -oP 'v\d+\.\d+\.\d+' | head -1 || true)
   info "Caddy already installed: ${CADDY_INSTALLED_VER}"
@@ -156,9 +158,11 @@ else
   curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" \
     | gpg --batch --yes --dearmor \
     -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 
-  echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
-    > /etc/apt/sources.list.d/caddy-stable.list
+  curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" \
+    | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
+  chmod o+r /etc/apt/sources.list.d/caddy-stable.list
 
   apt-get update -qq
   apt-get install -y caddy
