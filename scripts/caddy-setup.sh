@@ -321,7 +321,7 @@ cat > "$CADDYFILE" << 'CADDYEOF'
 
             # Force HTTP/1.1 to the backend — WebSocket is not compatible with HTTP/2
             transport http {
-                versions h1
+                versions 1.1
             }
         }
     }
