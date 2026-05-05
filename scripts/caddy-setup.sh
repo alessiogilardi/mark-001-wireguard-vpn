@@ -280,20 +280,19 @@ if [[ -f "$CADDYFILE" ]]; then
   info "Backup: ${BACKUP}"
 fi
 
-# Note: the Caddyfile uses a single-quote heredoc ('CADDYEOF') to prevent bash
-# from expanding ${ } — Caddy variables like {env.WSTUNNEL_SECRET} must arrive
-# literally in the file and are expanded by Caddy at runtime.
-cat > "$CADDYFILE" << 'CADDYEOF'
+# Unquoted heredoc: bash expands ${WSTUNNEL_SECRET} into the path literal.
+# Caddy does not expand {env.*} in path matchers — the secret must be written
+# as a literal value at Caddyfile generation time.
+# Caddy placeholders like {http.request.header.*} are not prefixed with $ so
+# bash leaves them intact.
+cat > "$CADDYFILE" << CADDYEOF
 # =============================================================================
 # Caddyfile — TLS reverse proxy for wstunnel + web services
 #
-# WSTUNNEL_SECRET is injected by systemd via EnvironmentFile.
-# Do not manually edit the secret value here — it is read from
-# /etc/wstunnel/secret-env which is the centralised source of truth.
-#
+# Secret embedded as literal path at generation time by caddy-setup.sh.
 # To update the secret:
 #   1. rm /etc/wstunnel/secret && sudo ./wstunnel-server-setup.sh
-#   2. sudo systemctl restart wstunnel caddy
+#   2. sudo ./caddy-setup.sh   (rewrites Caddyfile with new secret)
 #   3. Redistribute client packages (wg-add-client.sh)
 # =============================================================================
 
@@ -308,7 +307,7 @@ cat > "$CADDYFILE" << 'CADDYEOF'
     # Match: path starting with /<secret>/
     # The path is passed intact to wstunnel — wstunnel independently verifies
     # the prefix with --restrict-http-upgrade-path-prefix (second check).
-    handle /{env.WSTUNNEL_SECRET}/* {
+    handle /${WSTUNNEL_SECRET}/* {
         reverse_proxy 127.0.0.1:8080 {
             # Disable response buffering — required for WebSocket.
             # Without this Caddy accumulates data before sending, breaking
@@ -374,8 +373,8 @@ section "Starting Caddy service"
 systemctl daemon-reload
 
 if systemctl is-active --quiet caddy 2>/dev/null; then
-  systemctl reload caddy 2>/dev/null || systemctl restart caddy
-  success "caddy.service reloaded"
+  systemctl restart caddy
+  success "caddy.service restarted"
 else
   systemctl enable --now caddy
   success "caddy.service enabled and started"
