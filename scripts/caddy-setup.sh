@@ -18,13 +18,12 @@
 #
 # Certificate:
 #   Self-signed EC P-256 generated in /etc/caddy/tls/
-#   wstunnel clients use certificate pinning against this file.
 #   wg-add-client.sh reads it from /etc/caddy/tls/cert.pem to include it
-#   in the client package.
+#   in the client package for reference (cert pinning not supported in wstunnel v10+).
 #
 # Future migration to Let's Encrypt:
-#   Replace the tls block in the Caddyfile with the ACME certificate path
-#   and redistribute client packages with the new cert.pem.
+#   Replace the tls block in the Caddyfile with the ACME certificate path.
+#   Client packages do not need redistribution — wstunnel v10 has no cert pinning.
 #
 # This script is idempotent.
 # =============================================================================
@@ -205,11 +204,10 @@ else
 fi
 
 if [[ "$REGEN_CERT" == true ]]; then
-  info "Generating self-signed RSA-4096 certificate (CN=${SERVER_IP})..."
+  info "Generating self-signed EC P-256 certificate (CN=${SERVER_IP})..."
 
-  # subjectAltName=IP: required for OpenSSL 3+ and Go (wstunnel is written in Rust
-  # but uses rustls which verifies SAN). Without SAN, certificate pinning fails
-  # on modern clients even with --tls-ca-certificate.
+  # subjectAltName=IP: required for OpenSSL 3+ strict SAN validation.
+  # Without SAN, TLS handshake fails on modern clients when --tls-verify-certificate is used.
   openssl req -x509 \
     -newkey ec \
     -pkeyopt ec_paramgen_curve:P-256 \
@@ -229,8 +227,9 @@ if [[ "$REGEN_CERT" == true ]]; then
     | cut -d= -f2 || true)
   info "Expires: ${CERT_EXPIRY}"
 
-  warn "⚠  Certificate regenerated — all wstunnel clients with certificate pinning"
-  warn "   must receive the new package. Re-run wg-add-client.sh for each one."
+  warn "⚠  Certificate regenerated."
+  warn "   wstunnel v10 has no cert pinning — clients do NOT need new packages."
+  warn "   Redistribution is only required if the shared secret changes."
 fi
 
 openssl x509 -in "$CADDY_CERT" -noout -subject -enddate 2>/dev/null | sed 's/^/  /'
@@ -262,7 +261,8 @@ mkdir -p "$SERVICE_OVERRIDE_DIR"
 # Drop-in override — does not modify the official service (upgrade-resistant)
 cat > "${SERVICE_OVERRIDE_DIR}/env.conf" << EOF
 [Service]
-# Inject WSTUNNEL_SECRET into the Caddy process for the Caddyfile ({env.WSTUNNEL_SECRET})
+# WSTUNNEL_SECRET injected for completeness; the Caddyfile bakes the secret as a
+# literal at generation time — Caddy does not expand {env.*} in path matchers.
 EnvironmentFile=${SECRET_ENV_FILE}
 EOF
 
@@ -298,7 +298,7 @@ cat > "$CADDYFILE" << CADDYEOF
 
 :443 {
     # TLS with self-signed certificate.
-    # Source of truth for wstunnel client certificate pinning.
+    # Included in client packages for reference; cert pinning not supported in wstunnel v10+.
     tls /etc/caddy/tls/cert.pem /etc/caddy/tls/key.pem {
         protocols tls1.3
     }
@@ -436,7 +436,7 @@ section "Caddy setup complete"
 
 echo -e "  Version      : ${BOLD}$(caddy version 2>/dev/null | grep -oP 'v\d+\.\d+\.\d+' | head -1)${NC}"
 echo -e "  Certificate  : ${BOLD}${CADDY_CERT}${NC}"
-echo -e "                 ↑ sole source for client certificate pinning"
+echo -e "                 ↑ included in client packages for reference (no cert pinning in wstunnel v10+)"
 echo -e "  TLS key      : ${BOLD}${CADDY_KEY}${NC}"
 echo -e "  Caddyfile    : ${BOLD}${CADDYFILE}${NC}"
 echo -e "  Port         : ${BOLD}TCP:${PUBLIC_PORT}${NC}"

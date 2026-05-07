@@ -31,7 +31,9 @@ Client
                  └─ WireGuard
 ```
 
-Caddy is the sole TLS termination point. wstunnel runs on loopback only, no TLS, no public port. The shared secret is the URL path prefix; both Caddy (via `{env.WSTUNNEL_SECRET}`) and wstunnel (via `--restrict-http-upgrade-path-prefix`) verify it independently.
+Caddy is the sole TLS termination point. wstunnel runs on loopback only, no TLS, no public port. The shared secret is the URL path prefix; both Caddy and wstunnel (via `--restrict-http-upgrade-path-prefix`) verify it independently.
+
+**Caddyfile note:** `{env.WSTUNNEL_SECRET}` is NOT expanded in Caddy path matchers at runtime. The secret is written as a literal value into the Caddyfile by `caddy-setup.sh` at generation time (unquoted heredoc, bash expands `${WSTUNNEL_SECRET}`). Re-run `caddy-setup.sh` after changing the secret.
 
 ## Key Files on the Server
 
@@ -42,14 +44,15 @@ Caddy is the sole TLS termination point. wstunnel runs on loopback only, no TLS,
 | `/root/wg-clients/` | Generated client `.conf` files and wstunnel packages — delete after distributing |
 | `/etc/wstunnel/secret` | Raw secret (source of truth) |
 | `/etc/wstunnel/secret-env` | `KEY=VALUE` format, consumed by both wstunnel and caddy systemd units via `EnvironmentFile` |
-| `/etc/caddy/tls/cert.pem` | TLS cert — the pinned cert included in every wstunnel client package |
+| `/etc/caddy/tls/cert.pem` | TLS cert — included in every wstunnel client package (cert pinning not supported in wstunnel v10+) |
 | `/etc/caddy/Caddyfile` | Caddy routing config |
 
 ## Important Conventions
 
 - Peer metadata is stored as comments in `wg0.conf` (`# PeerName:`, `# PeerIP:`, `# PeerType:`). `wg-add-client.sh` uses these to build the peer list and find the next free IP.
 - The VPN subnet is hardcoded to `/24` in `wg-add-client.sh` (constraint checked at runtime). Server always gets `.1`, Pi gets `.2`, mobile peers start at `.3`.
-- Certificate pinning uses the Caddy cert (`/etc/caddy/tls/cert.pem`), not `/etc/wstunnel/cert.pem` (old path — no longer used). If the cert is regenerated, all wstunnel client packages must be redistributed.
+- wstunnel v10 removed `--tls-ca-certificate` — certificate pinning is not possible client-side. TLS is still active (encryption), but the client does not verify the server cert. Security relies on: TLS encryption + secret path (double-checked by Caddy and wstunnel) + WireGuard encryption/auth.
+- `/etc/wstunnel/cert.pem` is an old path — no longer used. Current cert is at `/etc/caddy/tls/cert.pem`. Still included in client packages for reference but not for pinning.
 - Regenerating the secret (`rm /etc/wstunnel/secret` + re-run step 3) invalidates all existing wstunnel clients.
 - For gateway peers, routes are added to the kernel with `ip route replace` at peer-add time (no WireGuard restart needed).
 - MTU: standard peers use 1420; wstunnel peers use 1300 to account for TLS + WebSocket overhead.

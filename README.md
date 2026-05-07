@@ -147,7 +147,7 @@ Peer types:
 - **Mobile** — split-tunnel (VPN + home subnet), standard UDP or wstunnel/TLS
 - **Gateway** — router for an additional local subnet (same pattern as the Pi)
 
-For wstunnel/TLS peers, the script produces a `.tar.gz` package containing the WireGuard config, the pinned Caddy certificate, and a README with start commands.
+For wstunnel/TLS peers, the script produces a `.tar.gz` package containing the WireGuard config, the Caddy certificate (for reference), and a README with start commands.
 
 ---
 
@@ -178,15 +178,16 @@ Windows/macOS: download the binary from the [releases page](https://github.com/e
 ```bash
 # Terminal 1 — keep open
 wstunnel client \
-  --tls-ca-certificate /path/to/server-cert.pem \
   --http-upgrade-path-prefix "<SECRET>" \
-  --websocket-ping-frequency-sec 30 \
+  --websocket-ping-frequency 30s \
   -L "udp://127.0.0.1:51821:127.0.0.1:51820?timeout_sec=0" \
   wss://<SERVER_IP>:443
 
 # Terminal 2
 sudo wg-quick up /path/to/<client>.conf
 ```
+
+> **Note:** wstunnel v10 removed `--tls-ca-certificate`. TLS is active but the server cert is not verified client-side. Security relies on TLS encryption + secret path authentication + WireGuard double encryption.
 
 The exact commands (with the correct secret) are in the `README.txt` inside the package.
 
@@ -216,7 +217,7 @@ scp /root/wg-clients/<name>.conf user@<GATEWAY_IP>:/tmp/
 | `/root/wg-clients/` | Generated client configs and packages — **delete after distributing** |
 | `/etc/wstunnel/secret` | Raw shared secret (source of truth) |
 | `/etc/wstunnel/secret-env` | `KEY=VALUE` env file consumed by both systemd units |
-| `/etc/caddy/tls/cert.pem` | Pinned TLS cert included in every wstunnel client package |
+| `/etc/caddy/tls/cert.pem` | TLS cert included in every wstunnel client package (cert pinning not available in wstunnel v10+) |
 | `/etc/caddy/Caddyfile` | Caddy routing config |
 
 ---
@@ -244,12 +245,11 @@ sudo systemctl restart wstunnel caddy
 ```
 
 ### Regenerate the TLS certificate
-This invalidates **all existing wstunnel client packages** (certificate pinning).
 ```bash
 sudo rm /etc/caddy/tls/cert.pem /etc/caddy/tls/key.pem
 sudo bash caddy-setup.sh
-# Re-run wg-add-client.sh for each wstunnel peer
 ```
+Note: cert pinning is not supported in wstunnel v10+, so redistributing client packages is not required when the cert changes.
 
 ### Remove a peer
 ```bash
@@ -287,8 +287,8 @@ journalctl -u caddy -n 50
 caddy validate --config /etc/caddy/Caddyfile
 ```
 
-**Certificate pinning failure on client**
-The client's `server-cert.pem` is stale. Regenerate the cert (see above) and redistribute client packages.
+**TLS connection refused or cert error**
+wstunnel v10 does not verify the server cert by default — TLS errors on the client are unlikely. If using `--tls-verify-certificate` (publicly trusted cert only), ensure the cert is valid and matches the server IP/hostname.
 
 **404 from wstunnel path**
 The secret in the wstunnel client command does not match `/etc/wstunnel/secret`. Re-generate the client package with `wg-add-client.sh`.

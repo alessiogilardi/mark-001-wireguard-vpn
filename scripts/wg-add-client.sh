@@ -519,8 +519,8 @@ if [[ "$CLIENT_TYPE" == "mobile" ]]; then
     fi
 
     if [[ "$WSTUNNEL_CLIENT_OS" == "linux" ]]; then
-      WSTUNNEL_POSTUP="PostUp   = iptables -t mangle -C FORWARD -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
-      WSTUNNEL_POSTDOWN="PostDown = iptables -t mangle -D FORWARD -o ${WG_IFACE} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null"
+      WSTUNNEL_POSTUP="PostUp   = iptables -t mangle -A FORWARD -o %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -A OUTPUT -o %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+      WSTUNNEL_POSTDOWN="PostDown = iptables -t mangle -D FORWARD -o %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; iptables -t mangle -D OUTPUT -o %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null"
       WSTUNNEL_MSS_COMMENT="# MSS clamping — prevents TCP fragmentation from TLS+WebSocket overhead."
     else
       WSTUNNEL_POSTUP="# PostUp not supported on this OS — MSS clamping must be configured server-side."
@@ -574,11 +574,11 @@ else
 Address = ${CLIENT_IP}/32
 PrivateKey = ${CLIENT_PRIV}
 MTU = 1420
-PostUp = iptables -t filter -C FORWARD -i ${WG_IFACE} -j ACCEPT 2>/dev/null || iptables -A FORWARD -i ${WG_IFACE} -j ACCEPT
-PostUp = iptables -t filter -C FORWARD -o ${WG_IFACE} -j ACCEPT 2>/dev/null || iptables -A FORWARD -o ${WG_IFACE} -j ACCEPT
+PostUp = iptables -t filter -C FORWARD -i ${WG_IFACE} -j ACCEPT 2>/dev/null || iptables -t filter -A FORWARD -i ${WG_IFACE} -j ACCEPT
+PostUp = iptables -t filter -C FORWARD -o ${WG_IFACE} -j ACCEPT 2>/dev/null || iptables -t filter -A FORWARD -o ${WG_IFACE} -j ACCEPT
 PostUp = iptables -t nat -C POSTROUTING -o ${GATEWAY_IFACE} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o ${GATEWAY_IFACE} -j MASQUERADE
-PostDown = iptables -D FORWARD -i ${WG_IFACE} -j ACCEPT 2>/dev/null
-PostDown = iptables -D FORWARD -o ${WG_IFACE} -j ACCEPT 2>/dev/null
+PostDown = iptables -t filter -D FORWARD -i ${WG_IFACE} -j ACCEPT 2>/dev/null
+PostDown = iptables -t filter -D FORWARD -o ${WG_IFACE} -j ACCEPT 2>/dev/null
 PostDown = iptables -t nat -D POSTROUTING -o ${GATEWAY_IFACE} -j MASQUERADE 2>/dev/null
 
 [Peer]
@@ -618,8 +618,8 @@ if [[ "$CLIENT_TYPE" == "mobile" && "$USE_WSTUNNEL" == true ]]; then
     "https://api.github.com/repos/erebe/wstunnel/releases/latest" \
     | grep -Eo '"tag_name": "v[^"]+"' | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' || true)
   if [[ -z "$WSTUNNEL_LATEST_VER" ]]; then
-    WSTUNNEL_LATEST_VER="10.5.4"
-    warn "GitHub API unreachable — wstunnel version in README: ${WSTUNNEL_LATEST_VER} (verify latest at github.com/erebe/wstunnel/releases)."
+    WSTUNNEL_LATEST_VER=$(wstunnel --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || true)
+    warn "GitHub API unreachable — using installed version ${WSTUNNEL_LATEST_VER:-unknown} in README (verify latest at github.com/erebe/wstunnel/releases)."
   fi
 
   cat > "${PKG_DIR}/README.txt" << README
@@ -664,16 +664,16 @@ STARTING A VPN SESSION (required order)
 STEP 1 — Terminal 1: start wstunnel (keep it open for the entire session)
 
   wstunnel client \\
-    --tls-ca-certificate /path/to/server-cert.pem \\
     --http-upgrade-path-prefix "${WSTUNNEL_SECRET}" \\
-    --websocket-ping-frequency-sec 30 \\
+    --websocket-ping-frequency 30s \\
     -L "udp://127.0.0.1:${LOCAL_WSTUNNEL_PORT}:127.0.0.1:${WG_PORT}?timeout_sec=0" \\
     wss://${SERVER_IP_FOR_ENDPOINT}:${WSTUNNEL_PORT}
 
-  Replace /path/to/server-cert.pem with the absolute path to server-cert.pem.
-
-  Option without certificate pinning (less secure):
-    Replace --tls-ca-certificate ... with --tls-insecure
+  TLS NOTE: wstunnel v10 removed --tls-ca-certificate. Certificate verification is
+  disabled by default — wstunnel connects to self-signed certs without error.
+  TLS still encrypts the tunnel; WireGuard adds a second encryption layer on top.
+  To enable standard cert verification (requires a publicly trusted cert), add:
+    --tls-verify-certificate
 
 STEP 2 — Terminal 2: bring up WireGuard
 
@@ -704,6 +704,11 @@ SECURITY
   The secret in the URL is equivalent to a password: do not share it.
   The server (Caddy) accepts connections ONLY from the path with the correct secret.
   wstunnel performs an independent second check (defence in depth).
+  server-cert.pem is included for reference. wstunnel v10 removed --tls-ca-certificate
+  so cert pinning is not possible client-side. Security layers in place:
+    1. TLS encryption (Caddy self-signed cert, unverified by client)
+    2. Secret path authentication (Caddy + wstunnel double-check)
+    3. WireGuard encryption + authentication (keys + PSK)
 ==============================================================
 README
 
