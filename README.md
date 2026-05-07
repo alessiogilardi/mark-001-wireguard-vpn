@@ -147,7 +147,7 @@ Peer types:
 - **Mobile** — split-tunnel (VPN + home subnet), standard UDP or wstunnel/TLS
 - **Gateway** — router for an additional local subnet (same pattern as the Pi)
 
-For wstunnel/TLS peers, the script produces a `.tar.gz` package containing the WireGuard config, the Caddy certificate (for reference), and a README with start commands.
+For wstunnel/TLS peers, the script produces a `.tar.gz` package containing the WireGuard config and a README with start commands.
 
 ---
 
@@ -160,7 +160,7 @@ For wstunnel/TLS peers, the script produces a `.tar.gz` package containing the W
 
 ### Mobile — wstunnel/TLS mode
 
-The package from `wg-add-client.sh` contains everything needed.
+The package from `wg-add-client.sh` contains the WireGuard config and a `README.txt` with the exact start commands (including the correct secret).
 
 **Install wstunnel once** (Linux/WSL2 amd64 example):
 ```bash
@@ -169,11 +169,37 @@ curl -L -o /tmp/wstunnel.tar.gz \
   "https://github.com/erebe/wstunnel/releases/download/v${WSTUNNEL_VER}/wstunnel_${WSTUNNEL_VER}_linux_amd64.tar.gz"
 tar xzf /tmp/wstunnel.tar.gz -C /tmp/
 sudo mv /tmp/wstunnel /usr/local/bin/wstunnel
+sudo apt install wireguard-tools   # if not already installed
 ```
 
 Windows/macOS: download the binary from the [releases page](https://github.com/erebe/wstunnel/releases/latest).
 
-**Start a VPN session (required order):**
+#### Option A — vpn-client.sh (recommended, Linux/WSL2)
+
+`vpn-client.sh` manages wstunnel + WireGuard in a single command.
+
+```bash
+# 1. Create config file (SECRET from /etc/wstunnel/secret on server)
+cat > vpn.conf << EOF
+SERVER_IP=<server-ip>
+SECRET=<secret>
+WG_CONF=/path/to/<client>.conf
+EOF
+chmod 600 vpn.conf
+
+# 2. Start
+sudo bash scripts/vpn-client.sh start --config vpn.conf
+
+# 3. Check
+bash scripts/vpn-client.sh status --config vpn.conf
+
+# 4. Stop
+sudo bash scripts/vpn-client.sh stop --config vpn.conf
+```
+
+> `vpn.conf` contains the raw secret — never commit it to version control.
+
+#### Option B — manual (all platforms)
 
 ```bash
 # Terminal 1 — keep open
@@ -187,15 +213,13 @@ wstunnel client \
 sudo wg-quick up /path/to/<client>.conf
 ```
 
-> **Note:** wstunnel v10 removed `--tls-ca-certificate`. TLS is active but the server cert is not verified client-side. Security relies on TLS encryption + secret path authentication + WireGuard double encryption.
-
-The exact commands (with the correct secret) are in the `README.txt` inside the package.
-
 **Shutdown:**
 ```bash
 sudo wg-quick down /path/to/<client>.conf
 # Ctrl+C in Terminal 1
 ```
+
+> **Note:** wstunnel v10 removed `--tls-ca-certificate`. TLS is active but the server cert is not verified client-side. Security relies on TLS encryption + secret path authentication + WireGuard double encryption.
 
 ### Gateway peer
 
@@ -217,7 +241,7 @@ scp /root/wg-clients/<name>.conf user@<GATEWAY_IP>:/tmp/
 | `/root/wg-clients/` | Generated client configs and packages — **delete after distributing** |
 | `/etc/wstunnel/secret` | Raw shared secret (source of truth) |
 | `/etc/wstunnel/secret-env` | `KEY=VALUE` env file consumed by both systemd units |
-| `/etc/caddy/tls/cert.pem` | TLS cert included in every wstunnel client package (cert pinning not available in wstunnel v10+) |
+| `/etc/caddy/tls/cert.pem` | TLS cert — not included in client packages (cert pinning unavailable in wstunnel v10+) |
 | `/etc/caddy/Caddyfile` | Caddy routing config |
 
 ---
