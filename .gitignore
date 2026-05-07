@@ -274,3 +274,7 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,python,powershell,linux,windows,macos
+
+# VPN client secrets
+vpn.conf
+*.secret
