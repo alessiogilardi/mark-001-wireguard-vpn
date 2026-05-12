@@ -360,7 +360,7 @@ echo ""
 echo "  Caddy will handle:"
 echo "    - TLS termination on TCP:443"
 echo "    - Routing wstunnel traffic to /<secret>"
-echo "    - Certificate generation for client certificate pinning"
+echo "    - Self-signed certificate generation (cert pinning not supported in wstunnel v10+)"
 echo ""
 echo -e "${GREEN}Service status:${NC}"
 systemctl status wstunnel --no-pager -l | head -20
