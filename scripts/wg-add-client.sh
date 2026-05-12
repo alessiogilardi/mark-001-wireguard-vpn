@@ -349,6 +349,7 @@ if [[ "$CLIENT_TYPE" == "gateway" ]]; then
   echo ""
   read -rp "$(echo -e "${YELLOW}Gateway local network interface [eth0]:${NC} ")" GATEWAY_IFACE
   GATEWAY_IFACE="${GATEWAY_IFACE:-eth0}"
+  [[ ! "$GATEWAY_IFACE" =~ ^[a-zA-Z0-9._-]+$ ]] && error "Invalid interface name: ${GATEWAY_IFACE}"
 
   echo ""
   GATEWAY_REACH_HOME=false

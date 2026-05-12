@@ -234,6 +234,7 @@ echo "  Verify on the Pi with: ip a"
 echo ""
 read -rp "$(echo -e "${YELLOW}  Pi ethernet interface name [eth0]:${NC} ")" PI_IFACE
 PI_IFACE="${PI_IFACE:-eth0}"
+[[ ! "$PI_IFACE" =~ ^[a-zA-Z0-9._-]+$ ]] && error "Invalid interface name: ${PI_IFACE}"
 info "Pi interface set to: ${PI_IFACE}"
 
 cat > "${OUTPUT_DIR}/raspberry-pi.conf" << EOF
