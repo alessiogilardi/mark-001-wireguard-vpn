@@ -1,0 +1,3 @@
+- Aggiungi possibilità di creare il file vpn.conf per il client direttamente da browser
+- aggiungere che venga tutto aggiunto all'archivio quando aggiungo un client
+- potenziare gli script in modo che vengano eseguiti come CLI e amministrino il tutto in modo semplificato
